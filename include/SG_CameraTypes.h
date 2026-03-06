@@ -1,6 +1,12 @@
 #pragma once
+#include <string>
+#include <opencv2/core.hpp>
+#include <opencv2/opencv.hpp>
 
+#ifdef __cplusplus
 namespace sgmix {
+#endif
+
 enum {
     PLARFORM_NVIDIA = 1,
     PLARFORM_ROCKCHIP = 2,
@@ -78,5 +84,75 @@ struct Camera_ExtrinsicMatrix {
     double Ty;
     double Tz;
 };
+
+/**
+ * @brief IMU data structure containing accelerometer and gyroscope readings.
+ */
+struct IMUData {
+    // int64_t timestamp;
+    float accel_x;
+    float accel_y;
+    float accel_z;
+    float anglvel_x;
+    float anglvel_y;
+    float anglvel_z;
+};
+
+/**
+ * @brief Sensor data frame structure containing image and IMU data
+ */
+struct SensorDataFrame {
+    /** Timestamp (microsecond precision) */
+    int64_t timestamp;
+    
+    /** Image frame data */
+    cv::Mat image;
+    
+    struct IMUData imu_data;
+
+    double exposure_time=0.0;
+};
+
+/**
+ * @brief Stereo image frame structure.
+ */
+struct StereoFrame {
+        cv::Mat left_rect;
+        cv::Mat right_rect;
+};
+
+/**
+* @brief Stereo camera initialization configuration structure.
+*/
+struct StereoConfig {
+    /** JSON format camera parameter file path (intrinsics, distortion coefficients, etc.) */
+    std::string json_file;
+
+
+    /** Encryption file path for SDK authorization or encrypted data processing */
+    std::string enc_file;
+
+
+    /** Key file path for decryption or SDK authorization verification */
+    std::string key_file;
+};
+
+struct DistortionCorrectionResult {
+    /** Corrected image data */
+    cv::Mat corrected_image;
+    
+    /** Processing time in milliseconds */
+    double processing_time_ms;
+    
+    /** Error message if correction failed */
+    std::string error_message;
+    
+    /** Success flag */
+    bool success;
+};
+
 #pragma pack(pop)
+
+#ifdef __cplusplus
 } // namespace sgmix
+#endif

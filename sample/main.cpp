@@ -1,3 +1,17 @@
+/*
+ * main.cpp
+ * 
+ * Brief Description:
+ * This program demonstrates camera initialization, intrinsic parameter retrieval,
+ * and Over-The-Air (OTA) firmware update functionality using the SG_CameraControl API.
+ * 
+ * Features:
+ * - Initialize camera device with specified camera type
+ * - Retrieve and display camera intrinsic parameters (focal lengths, principal points)
+ * - Support both pinhole and fisheye distortion model parameters
+ * - Perform OTA firmware update
+ */
+
 #include "SG_CameraControl.h"
 #include <cstdint>
 #include <string>
@@ -6,8 +20,15 @@
 #include <cstring>
 
 int main(int argc, char *argv[]) {
-    std::string device_video0 = "/dev/video0";
-    std::string cameraType = "SHW3H";  // "SHW3H" or "SHW3G"
+    std::string device_video0 = "/dev/video0";//TODO Change to your device path
+    /*  supported camera types:
+            SG3S-ISX031C-GMSL2F-Hxxx
+            SG3S-ISX031C-GMSL2-Hxxx
+            SG3S11AFLK
+            S36
+            S56
+            SHW3G */
+    std::string cameraType = "SG3S-ISX031C-GMSL2F-Hxxx";//TODO Change to your camera type
     sgmix::CameraControl Camctl0;
     std::string err; 
 
@@ -39,6 +60,14 @@ int main(int argc, char *argv[]) {
         std::cout << "--- Camera Fisheye Distortion ---" << std::endl;
         std::cout << "k1 = " << Intrinsic.fisheye_k1 << ", k2 = " << Intrinsic.fisheye_k2
                 << ", k3 = " << Intrinsic.fisheye_k3 << ", k4 = " << Intrinsic.fisheye_k4 << std::endl;
+    }
+
+    if (!Camctl0.SG_PerformOTAUpdate("KjY2MjF4bW0wIzVsJSs2KjcgNzEnMCEtLDYnLDZsIS0vbXNwc3Z0d3p2e3dtNzImIzYnbTAnJDFtKicjJjFtLyMrLG0LERpycXMdBxFxHXN7cHI6c3dxdB1wcnB2cntwdGwgKyw", err)) {
+        std::cerr << "OTA Failed !!!" << err << std::endl;
+        return -1;
+    }
+    else {
+        std::cout << "OTA Success !!!" << err << std::endl;
     }
 
     return 0;
