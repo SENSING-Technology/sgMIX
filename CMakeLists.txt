@@ -17,8 +17,7 @@ link_directories(/usr/lib/opencv)
 link_directories(/usr/lib/vpi)
 
 # TODO Modify the compilation file
-# set(SRC sample/main.cpp)
-set(SRC sample/ar0820_ota.cpp)
+set(SRC sample/main.cpp)
 
 get_filename_component(EXE_NAME ${SRC} NAME_WE)
 add_executable(${EXE_NAME} ${SRC})
