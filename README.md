@@ -87,7 +87,16 @@ _(Supported only on SG3S-ISX031C-GMSL2F-Hxxx, SG3S-ISX031C-GMSL2-Hxxx, and S36)_
 
 ---
 
-# Quick Start and Installation Guide  
+# Quick Start and Installation Guide 
+
+## Installation SDK
+```plain
+git clone https://github.com/SENSING-Technology/sgMIX.git
+sudo apt install git-lfs 
+git lfs install
+git lfs pull
+```
+
 ## Dependency Installation
 Install the required dependencies before using the SDK.
 
