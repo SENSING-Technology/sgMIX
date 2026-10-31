@@ -1,38 +1,54 @@
 cmake_minimum_required(VERSION 3.10)
+project(sgmix_sdk_samples LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Threads REQUIRED)
+option(SGMIX_BUILD_BASIC_SAMPLES "Build minimal SDK examples" ON)
+option(SGMIX_BUILD_FULL_SAMPLES "Build complete command-line tools" ON)
 
-find_package(OpenCV REQUIRED)
+set(SGMIX_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(SGMIX_LIBRARY "${SGMIX_SDK_DIR}/lib/libsgmix.so")
+if(NOT EXISTS "${SGMIX_LIBRARY}")
+    message(FATAL_ERROR "sgMIX shared library not found: ${SGMIX_LIBRARY}")
+endif()
+add_library(sgmix SHARED IMPORTED GLOBAL)
+set_target_properties(sgmix PROPERTIES IMPORTED_LOCATION "${SGMIX_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${SGMIX_SDK_DIR}/include")
 
-include_directories(${OpenCV_INCLUDE_DIRS})
-include_directories(/usr/include/opencv4)
-include_directories(/usr/include/sDepth)
-include_directories(/usr/include/vpi)
-include_directories(/usr/include)
+function(sgmix_add_sample target source)
+    add_executable(${target} ${source})
+    target_link_libraries(${target} PRIVATE sgmix Threads::Threads)
+    set_target_properties(${target} PROPERTIES BUILD_RPATH "${SGMIX_SDK_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib")
+endfunction()
 
-link_directories(/usr/lib)
-link_directories(/usr/lib/sDepth)
-link_directories(/usr/lib/opencv)
-link_directories(/usr/lib/vpi)
+if(SGMIX_BUILD_FULL_SAMPLES)
+    sgmix_add_sample(camera_data_tool sample/camera_data_tool.cpp)
+    sgmix_add_sample(camera_ota sample/camera_ota.cpp)
+    sgmix_add_sample(camera_frame_capture sample/camera_frame_capture.cpp)
+    sgmix_add_sample(camera_image_controls sample/camera_image_controls.cpp)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SGMIX_VIEW_GST QUIET IMPORTED_TARGET gstreamer-app-1.0 gstreamer-video-1.0)
+    endif()
+    if(TARGET PkgConfig::SGMIX_VIEW_GST)
+        foreach(target IN ITEMS camera_frame_capture camera_image_controls)
+            target_link_libraries(${target} PRIVATE PkgConfig::SGMIX_VIEW_GST)
+            target_compile_definitions(${target} PRIVATE SGMIX_SAMPLE_ENABLE_GSTREAMER=1)
+        endforeach()
+    else()
+        target_compile_definitions(camera_frame_capture PRIVATE SGMIX_SAMPLE_ENABLE_GSTREAMER=0)
+        target_compile_definitions(camera_image_controls PRIVATE SGMIX_SAMPLE_ENABLE_GSTREAMER=0)
+        message(STATUS "camera_image_controls: rebuild with GStreamer App/Video development packages for live validation")
+        message(STATUS "camera_frame_capture: preview and YUV-to-NV12 conversion disabled (GStreamer development packages not found)")
+    endif()
+endif()
 
-# TODO Modify the compilation file
-set(SRC sample/main.cpp)
-
-get_filename_component(EXE_NAME ${SRC} NAME_WE)
-add_executable(${EXE_NAME} ${SRC})
-
-target_link_libraries(${EXE_NAME} 
-    sgmix
-    sDepth
-    opencv_core
-    opencv_imgproc
-    opencv_imgcodecs
-    curl
-    jsoncpp
-    gstreamer-1.0
-    gstapp-1.0
-    glib-2.0
-    gobject-2.0
-    nvvpi
-)
+if(SGMIX_BUILD_BASIC_SAMPLES)
+    foreach(name IN ITEMS v4l2_capture sipl_capture sipl_stereo_capture v4l2_read_sn
+                          sipl_read_calibration v4l2_correct_capture
+                          v4l2_image_flip sipl_image_flip)
+        sgmix_add_sample(basic_${name} sample/basic/${name}.cpp)
+    endforeach()
+endif()
