@@ -25,67 +25,38 @@ public:
     // Initialization
     // =========================================================================
     /**
-     * @brief Initialize a camera from the supplied configuration.
-     * @param config Camera model, device route, platform, and optional I2C overrides.
-     * @param error Output string for error information (if any).
-     * @return True on success, false otherwise.
+     * @brief Initialize the V4L2/I2C or SIPL camera backend.
+     * @param config Backend selection and initialization parameters.
+     * @param error Output diagnostic string.
+     * @return True on success. A backend initialization failure leaves the object uninitialized.
      *
-     * @note An empty model is loaded for config.videoDevice (/dev/videoN) from
-     *       /opt/sgMIX/etc/sgmix.conf, which must select the v4l2 framework.
-     *       An explicit model takes precedence. Other omitted values use defaults
-     *       or automatic detection. Each call replaces
-     *       prior connection overrides. Failure leaves the object uninitialized.
+     * @note V4L2 loads an omitted model from the saved /dev/videoN mapping.
+     *       Explicit settings take precedence and replace prior connection overrides.
+     * @note SIPL cameraPort is the zero-based Driver CAM connector before link masking.
+     *       Omit it only when a single sensor is enabled. With an explicit JSON path,
+     *       empty masks select all JSON links. An empty path uses the saved SIPL JSON
+     *       and supplies any omitted configuration name and masks.
+     * @note Identical SIPL configurations share a session. Release all bindings before
+     *       switching configurations. Serialize calls on each CameraControl object.
+     *       Call SG_StartCapture separately to start streaming.
      */
-    bool SG_Init(const CameraConfig& config, std::string& error);
-
-    /**
-     * Initialize an Init-only SIPL EEPROM session (no capture Start()).
-     * cameraPort is the 0-based driver connector number (CAM), derived from transport/link,
-     * before link masks are applied. UINT32_MAX (the default) automatically binds a single sensor.
-     * With an explicit jsonPath, linkMasks select links in transport order;
-     * empty means all JSON-configured links, as before.
-     * With an empty jsonPath, load JSON, omitted configName and omitted linkMasks
-     * from /opt/sgMIX/etc/sgmix.conf (SGMIX_FRAMEWORK must be sipl).
-     * Saved masks must select at least one link. Explicit configName/masks win.
-     * Multiple enabled cameras require an explicit cameraPort for each object.
-     * Disabled and invalid ports are rejected before hardware Init. Module channels
-     * are discovered from the expanded Query topology, independently of EEPROM layout.
-     * No pipeline ID is required. Configuration-tool ports follow driver transport/link mapping.
-     * Calls with identical JSON contents, config name and masks share a session.
-     * Uses the project's shared EEPROM offsets, encoding and CRC protocol.
-     * Supports GMSL module capture and unambiguous single-EEPROM data access with
-     * one virtual channel per sensor. Supports device/image info,
-     * serial number, resolution, camera and IMU calibration reads.
-     * Supports GW5/ISX031 firmware OTA with a matched JP7.2 MAX96717/F
-     * mono driver and existing NITO updates for mono RAW modules. Image controls
-     * reuse model sequences on active channels with verified MAX96717/F routes.
-     * Other device writes remain unsupported. Capture uses SG_StartCapture separately.
-     * No I2C information is required. Release all bindings before changing config.
-     * Calls on one CameraControl, including reinitialization, must be serialized
-     * by the caller. Do not run another camera owner against the same hardware.
-     */
-    bool SG_Init(const std::string& jsonPath,
-                 const std::string& configName, std::string& error,
-                 const std::vector<std::uint32_t>& linkMasks = {},
-                 std::uint32_t cameraPort = UINT32_MAX);
+    bool SG_Init(const CameraInitConfig& config, std::string& error);
 
     // =========================================================================
     // Frame Capture
     // =========================================================================
     /**
      * @brief Start capture on the initialized camera.
-     * @param config Capture source, size, frame rate, and pixel format constraints.
-     * @param error Output string for error information (if any).
-     * @return True when streaming is initiated, false otherwise.
+     * @param config Size, frame rate, pixel format, and optional channel settings.
+     * @param error Output error information.
+     * @return True when streaming is initiated. SG_GetFrame reports asynchronous errors.
      *
-     * @note Uses the bound video device or an explicit Argus sensor-id without
-     *       reading EEPROM image settings. SG_Init must succeed first.
-     *       Asynchronous negotiation/device errors are reported by SG_GetFrame.
-     *       SIPL uses its bound native pipeline. Multi-channel modules require
-     *       siplChannel in Query sensor order. Use one CameraControl object per
-     *       channel, initialized with the same port. EEPROM support is independent.
-     *       Reads are independent, not synchronized stereo pairs. correctDistortion enables
-     *       synchronous NV12 correction before SG_GetFrame returns.
+     * @note Call after successful SG_Init. RAW models use Argus, YUV models use V4L2,
+     *       and SIPL uses its bound pipeline. Argus defaults to sensor ID N from /dev/videoN.
+     *       For SIPL multi-channel modules, select siplChannel in Query sensor order and
+     *       initialize one object per channel on the same port. EEPROM access is independent.
+     *       Reads return individual frames without stereo synchronization.
+     *       correctDistortion applies synchronous NV12 correction in SG_GetFrame.
      */
     bool SG_StartCapture(const CaptureConfig& config, std::string& error);
 
@@ -114,23 +85,19 @@ public:
     bool SG_StopCapture(std::string& error);
 
     /**
-     * @brief Correct an existing NV12 frame without starting capture.
-     * @param input Owned CPU image; input pixels and metadata remain unchanged.
-     * @param output Owned, tightly packed NV12 image at the same resolution.
-     * @param error Output error; failure clears output except for in-place calls.
-     * @param intrinsics Optional per-sensor calibration. When supplied, no camera
-     *        initialization or EEPROM access is needed. Otherwise an initialized
-     *        camera's mono calibration is read once and cached until stop,
-     *        reinitialization. This never writes calibration.
-     * @return True on success, false for unsupported formats/models, invalid
-     *         image layouts/dimensions, VPI failures, or a build without VPI.
+     * @brief Synchronously correct an NV12 frame without starting capture.
+     * @param input Owned CPU frame. Pixels and metadata are preserved.
+     * @param output Owned, tightly packed NV12 frame at the input resolution, with the same sequence and timestamps.
+     * @param error Output error information.
+     * @param intrinsics Optional per-sensor calibration. Supplying it bypasses camera initialization
+     *        and EEPROM access. Otherwise, mono calibration is read once from the initialized
+     *        camera and cached until stop or reinitialization.
+     * @return True on success. Failure clears output. Passing the same Frame as input and
+     *         output returns false and preserves that Frame.
      *
-     * @note Supports Pinhole and equidistant Fisheye at calibration resolution.
-     *       Output retains sequence/PTS/capture time. Input/output must differ.
-     *       CUDA resources are created lazily, reused for matching parameters,
-     *       and released on stop/destruction. Completion is synchronous and
-     *       includes two CPU row copies. Serialize calls with other frame
-     *       operations; SG_StopCapture waits for active correction to finish.
+     * @note Requires VPI and supports pinhole and equidistant fisheye models at calibration
+     *       resolution. Serialize with other frame operations. SG_StopCapture waits for
+     *       active correction to finish.
      */
     bool SG_CorrectFrame(const Frame& input, Frame& output, std::string& error,
                          const std::optional<CameraCalibration::Intrinsics>& intrinsics = std::nullopt);
@@ -152,11 +119,11 @@ public:
     bool SG_GetDeviceInfo(DeviceInfo& info, std::string& error);
 
     /**
-     * @brief Read the CRC-validated image configuration of the current camera.
+     * @brief Read the current camera's image configuration.
      * @param info Output resolution, frame rate, pixel format, trigger mode,
      *        and embedded-data state.
      * @param error Output string for error information (if any).
-     * @return True on success and valid CRC32_1, false otherwise.
+     * @return True on success and valid CRC, false otherwise.
      *
      * @note The complete Camera Info block is read from EEPROM or sensor flash
      *       according to the camera model before its fields are decoded.
@@ -164,13 +131,10 @@ public:
     bool SG_GetImageInfo(ImageInfo& info, std::string& error);
 
     /**
-     * @brief Retrieve the CRC-validated serial number of the current camera.
+     * @brief Read the current camera's serial number.
      * @param serialnumber Output string for the camera serial number.
      * @param error Output string for error information (if any).
-     * @return True on successful read and valid CRC32_5, false otherwise.
-     *
-     * @note CRC32_5 covers only the valid serial-number characters. The first
-     *       0x00/0xFF terminator and all remaining padding bytes are excluded.
+     * @return True on successful read and valid CRC, false otherwise.
      */
     bool SG_GetCameraSerialNumber(std::string& serialnumber, std::string& error);
 
@@ -184,7 +148,7 @@ public:
     bool SG_GetCameraResolution(uint16_t& width, uint16_t& height, std::string& error);
 
     /**
-     * @brief Read CRC-validated camera calibration data.
+     * @brief Read camera calibration data.
      * @param calibration Output structure for mono or stereo calibration data.
      * @param error Output string for error information (if any).
      * @return True on success, false on a read or CRC validation failure.
@@ -194,12 +158,22 @@ public:
     bool SG_GetCalibration(CameraCalibration& calibration, std::string& error);
 
     /**
-     * @brief Read CRC-validated IMU calibration data from EEPROM.
+     * @brief Read IMU calibration data from EEPROM.
      * @param calibration Output structure for IMU calibration data.
      * @param error Output string for error information (if any).
-     * @return True on success, false otherwise.
+     * @return True on success, false on a read or CRC validation failure.
      */
     bool SG_GetImuCalibration(ImuCalibration& calibration, std::string& error);
+
+    /**
+     * @brief Read the current sensor trigger mode on a supported mono ISX031 camera.
+     * @note Call after SG_Init(). For an idle SIPL session, the SDK may briefly
+     *       start and stop the HAL to prepare the sensor control link.
+     * @param mode Output mode, set to Unknown on failure.
+     * @param error Output error information, cleared on success.
+     * @return True if the sensor registers were read and validated.
+     */
+    bool SG_GetCameraTriggerMode(SensorTriggerMode& mode, std::string& error);
 
     // =========================================================================
     // Image Processing
@@ -255,28 +229,28 @@ public:
     /**
      * @brief Update camera firmware or SIPL tuning data.
      * @param urlPath Local update file or existing encoded update-package URL.
-     * @param error Output string for error information.
-     * @note NVIDIA V4L2 S36 updates both eyes sequentially from either video node.
-     *       Both nodes must be saved as S36, and all camera captures must be stopped.
-     *       Both routes are checked before erase; no full-image readback comparison is performed.
-     *       A failure stops further writes and can leave different firmware in each eye.
-     *       Power-cycle the module after completion, then read both running versions.
-     * @note SIPL S36 upgrades physical left then right, then runs the supplier
-     *       address-configuration sequence without immediate right-address verification.
-     * @note SIPL firmware OTA requires all shared captures to be stopped. The
-     *       library verifies the matched serializer route and available EEPROM
-     *       identity before protocol access. GW5 requires EEPROM metadata;
-     *       ISX031 can use its driver route and bounded version query without it.
-     *       Once a firmware write/reset sequence is attempted, release all
-     *       shared camera objects and initialize again, including on failure.
-     * @note SIPL mono RAW updates replace the existing module NITO
-     *       file (up to 16 MiB), reload it and verify capture with all shared
-     *       captures stopped. Success saves the previous file as .bak; failure
-     *       restores and verifies it. Capture remains stopped. Objects can be
-     *       reused unless rollback fails and the error requires reinitialization.
+     * @param error Output error information.
      * @return True on success, false otherwise.
+     *
+     * @note GW6 ROM: updates the default components. V4L2 and the dedicated SIPL stereo
+     *       route validate the ROM file without configuration, sensor, or version preflight.
+     * @note S36/S36A firmware: updates the two eyes sequentially. For NVIDIA V4L2, either node
+     *       can initiate the update, both nodes must use the same product model, and all captures
+     *       must be stopped. Failure can leave different firmware on the two eyes. After
+     *       a successful V4L2 update, power-cycle the module and check both versions.
+     * @note SIPL firmware: stop all shared captures. GW5 requires EEPROM metadata.
+     *       After any attempted firmware write or reset, release all shared camera
+     *       objects and reinitialize, including on failure.
+     * @note SIPL NITO: supports mono RAW and matched S56/S56C RAW stereo modules with
+     *       an existing NITO file. Stop all shared captures. The update accepts up to
+     *       16 MiB, validates capture, and leaves capture stopped. Success saves the
+     *       old file as .bak. Failure restores and verifies it. Reinitialize if
+     *       rollback fails and the error requests it.
      */
     bool SG_PerformOTAUpdate(std::string urlPath, std::string& error);
+
+    /** Pass true to update the full ROM on a supported GW6 camera. */
+    bool SG_PerformOTAUpdate(std::string urlPath, std::string& error, bool fullRom);
 
     /**
      * @brief Configure the right S36 sensor address as 0x1B without firmware erase/write.
@@ -310,14 +284,6 @@ public:
                                   std::string& error);
 
     /**
-     * @brief Activate camera license using a network authentication code.
-     * @param authCode Authentication code provided by vendor.
-     * @param error Output string for error information.
-     * @return True on success, false otherwise.
-     */
-    bool SG_ActivateNetworkLicense(std::string authCode, std::string& error);
-
-    /**
      * @brief Get the current firmware version of the camera.
      * @param version Output string with firmware version.
      * @param error Output string for error information.
@@ -327,64 +293,64 @@ public:
 
     // =========================================================================
     // ISP Parameter Control
-    // @note These functions require a valid network license to use.
+    // @note These functions require a valid offline license with isp.adjust to use.
     // =========================================================================
     /**
-     * @brief Get the camera brightness setting.
+     * @brief Get the camera brightness.
      * @param brightness_percent Output brightness in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraBrightness(int& brightness_percent, std::string& error);
     /**
      * @brief Set the camera brightness.
      * @param brightness_percent Brightness in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraBrightness(int brightness_percent, std::string& error);
 
     /**
-     * @brief Get the camera contrast setting.
+     * @brief Get the camera contrast.
      * @param contrast_percent Output contrast in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraContrast(int& contrast_percent, std::string& error);
     /**
      * @brief Set the camera contrast.
      * @param contrast_percent Contrast in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraContrast(int contrast_percent, std::string& error);
 
     /**
-     * @brief Get the camera saturation setting.
+     * @brief Get the camera saturation.
      * @param saturation_percent Output saturation in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraSaturation(int& saturation_percent, std::string& error);
     /**
      * @brief Set the camera saturation.
      * @param saturation_percent Saturation in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraSaturation(int saturation_percent, std::string& error);
 
     /**
-     * @brief Get the camera sharpness setting.
+     * @brief Get the camera sharpness.
      * @param sharpness_percent Output sharpness in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraSharpness(int& sharpness_percent, std::string& error);
     /**
      * @brief Set the camera sharpness.
      * @param sharpness_percent Sharpness in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraSharpness(int sharpness_percent, std::string& error);
@@ -392,14 +358,14 @@ public:
     /**
      * @brief Get the camera denoise level.
      * @param denoise_percent Output denoise level in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraDenoise(int& denoise_percent, std::string& error);
     /**
      * @brief Set the camera denoise level.
      * @param denoise_percent Denoise level in the range 0-100.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraDenoise(int denoise_percent, std::string& error);
@@ -407,14 +373,14 @@ public:
     /**
      * @brief Enable or disable automatic exposure mode.
      * @param state True for automatic exposure; false for manual exposure.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetExposureMode(bool state, std::string& error);
     /**
      * @brief Get the current exposure mode.
      * @param state Output state; true for automatic exposure, false for manual.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetExposureMode(bool& state, std::string& error);
@@ -422,14 +388,14 @@ public:
     /**
      * @brief Get the current exposure time.
      * @param val Output exposure time in milliseconds.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetExposureTime(float& val, std::string& error);
     /**
      * @brief Set the manual exposure time.
      * @param val Exposure time in milliseconds.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetManualExposure(float val, std::string& error);
@@ -437,14 +403,14 @@ public:
     /**
      * @brief Get the current white-balance mode.
      * @param wb_mode Output state; true for automatic mode, false for manual.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraWhiteBalanceMode(bool& wb_mode, std::string& error);
     /**
      * @brief Set the white-balance mode.
      * @param wb_mode True for automatic mode; false for manual mode.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraWhiteBalanceMode(bool wb_mode, std::string& error);
@@ -454,7 +420,7 @@ public:
      * @param wb_R Output red-channel gain.
      * @param wb_G Output green-channel gain.
      * @param wb_B Output blue-channel gain.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetCameraWhiteBalance(int& wb_R, int& wb_G, int& wb_B, std::string& error);
@@ -463,7 +429,7 @@ public:
      * @param wb_R Red-channel gain.
      * @param wb_G Green-channel gain.
      * @param wb_B Blue-channel gain.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetCameraWhiteBalance(int wb_R, int wb_G, int wb_B, std::string& error);
@@ -471,14 +437,14 @@ public:
     /**
      * @brief Get the sensor analog-gain value.
      * @param val Output analog-gain value.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_GetGainValue(int& val, std::string& error);
     /**
      * @brief Set the manual sensor analog-gain value.
      * @param val Analog-gain value.
-     * @param error Output string for error information (if any).
+     * @param error Output error information.
      * @return True on success, false otherwise.
      */
     bool SG_SetManualGain(int val, std::string& error);

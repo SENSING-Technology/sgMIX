@@ -75,13 +75,11 @@ void usage(const char* program) {
         << "  Use the camera model or SIPL settings saved by the configuration tool.\n\n"
         << "  V4L2:\n"
         << "    " << program << " --v4l2 --video <video_device> [options]\n"
-        << "  NVIDIA Argus:\n"
-        << "    " << program << " --v4l2 --video <video_device> --argus [options]\n"
         << "  SIPL:\n"
         << "    " << program << " --sipl [--cam N] [options]\n\n"
         << "  Examples:\n"
         << "    " << program << " --v4l2 --video /dev/video6 --view\n"
-        << "    " << program << " --v4l2 --video /dev/video0 --argus --view\n"
+        << "    " << program << " --v4l2 --video /dev/video0 --view\n"
         << "    " << program << " --sipl --cam 6 --cam 7 --view\n\n"
         << "Mode 2: Specify Configuration Manually\n"
         << "  Use this mode when no configuration has been saved.\n\n"
@@ -106,8 +104,8 @@ void usage(const char* program) {
         << "  --bus N                     Override the known I2C bus\n"
         << "  --eeprom-addr ADDR          Host-visible 7-bit EEPROM address (0x08..0x77)\n"
         << "  --width W --height H        Set capture dimensions; omit both to negotiate\n"
-        << "  --argus                     Use NVIDIA Argus; sensor-id from /dev/videoN\n"
-        << "  --isx031-ebd                Decode the first ISX031 EBD row (V4L2 only)\n\n"
+        << "  --trigger MODE             NVIDIA V4L2 trigger (default, free-run, external)\n"
+        << "  --isx031-ebd                Decode the first EBD row on ISX031 and S36 (V4L2 only)\n\n"
         << "SIPL Options\n"
         << "  --cam N                     Select a Driver CAM; repeat for multiple cameras\n"
         << "  --channel N                 Select one module-local Query channel\n"
@@ -118,8 +116,8 @@ void usage(const char* program) {
         << "Additional Examples\n"
         << "  Capture 100 frames:\n"
         << "    " << program << " --v4l2 --video /dev/video6 --frames 100\n\n"
-        << "  Decode ISX031 first-row EBD (no row-count argument):\n"
-        << "    " << program << " --v4l2 --video /dev/video6 --isx031-ebd\n\n"
+        << "  Decode first-row EBD from one S36 channel:\n"
+        << "    " << program << " --v4l2 --video /dev/video6 --model S36 --isx031-ebd\n\n"
         << "  Preview with distortion correction:\n"
         << "    " << program << " --sipl --cam 7 --view --correct\n\n"
         << "  Preview both channels of a stereo module:\n"
@@ -132,7 +130,7 @@ void usage(const char* program) {
         << "  Without --cam, the SIPL configuration must select exactly one sensor.\n"
         << "  --channel and --stereo each require one explicit --cam; use only one of them.\n"
         << "  Use --json and --config together; specify --mask once.\n"
-        << "  --argus maps /dev/videoN to Argus sensor-id N.\n"
+        << "  RAW models use Argus automatically with sensor-id N from /dev/videoN.\n"
         << "  Argus correction uses calibration dimensions when width and height are omitted.\n"
         << "  EBD extraction cannot be combined with Argus or distortion correction.\n"
         << "  Channels run independently; frames are not paired by exposure time.\n"
@@ -194,8 +192,6 @@ Options parse(int argc, char** argv) {
             options.capture.width = number(value());
         else if (key == "--height")
             options.capture.height = number(value());
-        else if (key == "--argus")
-            options.capture.source = sgmix::CaptureConfig::Source::Argus;
         else if (key == "--channel")
             options.channel = number(value());
         else if (key == "--json")
@@ -209,6 +205,17 @@ Options parse(int argc, char** argv) {
             do {
                 options.masks.push_back(number(mask, UINT32_MAX, 0));
             } while (values >> mask);
+        }
+        else if (key == "--trigger") {
+            const auto mode = value();
+            if (mode == "default")
+                options.device.triggerMode = sgmix::CameraConfig::TriggerMode::Default;
+            else if (mode == "free-run")
+                options.device.triggerMode = sgmix::CameraConfig::TriggerMode::FreeRun;
+            else if (mode == "external")
+                options.device.triggerMode = sgmix::CameraConfig::TriggerMode::ExternalSync;
+            else
+                throw UsageError("Invalid trigger mode: " + mode + " (use default, free-run, or external)");
         }
         else if (key == "--isx031-ebd")
             options.capture.embeddedTopLines = 1;
@@ -233,7 +240,7 @@ Options parse(int argc, char** argv) {
         if (options.json.empty() != options.config.empty() || (!options.masks.empty() && options.json.empty()))
             throw UsageError("Use --json and --config together; --mask requires both");
         for (const auto* key : {"--video", "--model", "--bus", "--eeprom-addr", "--width", "--height",
-                                "--argus", "--isx031-ebd"})
+                                "--isx031-ebd", "--trigger"})
             if (seen.count(key))
                 throw UsageError(std::string(key) + " is not a SIPL option; native output comes from the driver");
         if (options.ports.empty())
@@ -246,8 +253,6 @@ Options parse(int argc, char** argv) {
         for (const auto* key : {"--cam", "--stereo", "--channel", "--json", "--config", "--mask"})
             if (seen.count(key))
                 throw UsageError(std::string(key) + " requires --sipl");
-        if (options.capture.source == sgmix::CaptureConfig::Source::Argus)
-            options.capture.argusSensorId = number(options.device.videoDevice.substr(10));
         if (seen.count("--width") != seen.count("--height") ||
             bool(options.capture.width) != bool(options.capture.height))
             throw UsageError("Set width and height together");
@@ -255,7 +260,7 @@ Options parse(int argc, char** argv) {
             options.capture.outputFormat = Format::Nv12;
             options.capture.correctDistortion = true;
         }
-        if (options.capture.embeddedTopLines && (options.correct || options.capture.argusSensorId))
+        if (options.capture.embeddedTopLines && options.correct)
             throw UsageError("--isx031-ebd requires uncorrected V4L2 input");
     }
     return options;
@@ -394,10 +399,9 @@ struct Nv12Converter {
         MappedFrame destination(output, destinationInfo, GST_MAP_WRITE);
         gst_video_converter_frame(converter, &source.video, &destination.video);
         output.sequence = input.sequence;
-        output.ptsNanoseconds = input.ptsNanoseconds;
         output.hostTimestampMicroseconds = input.hostTimestampMicroseconds;
         output.siplMetadata = input.siplMetadata;
-        output.embeddedMetadata = input.embeddedMetadata;
+        output.v4l2Metadata = input.v4l2Metadata;
     }
 };
 
@@ -559,7 +563,7 @@ std::vector<Channel> open(const Options& options) {
         channel.camera = std::make_unique<sgmix::CameraControl>();
         std::string error;
         const bool initialized = options.sipl
-            ? channel.camera->SG_Init(options.json, options.config, error, options.masks, channel.port)
+            ? channel.camera->SG_Init(sgmix::SiplCameraConfig{options.json, options.config, options.masks, channel.port}, error)
             : channel.camera->SG_Init(options.device, error);
         if (!initialized)
             throw std::runtime_error(channel.name + ": " + error);
@@ -593,8 +597,6 @@ void printFrame(const Channel& channel, const sgmix::Frame& frame) {
     std::cout << channel.name << " frame=" << frame.sequence << " size=" << frame.width << 'x' << frame.height
               << " format=" << pixelFormatName(frame.pixelFormat)
               << " bytes=" << frame.data.size() << " host-us=" << frame.hostTimestampMicroseconds;
-    if (frame.ptsNanoseconds)
-        std::cout << " pts-ns=" << *frame.ptsNanoseconds;
     if (frame.siplMetadata) {
         const auto& metadata = *frame.siplMetadata;
         std::cout << " sof-tsc=" << metadata.captureStartTsc << " eof-tsc=" << metadata.captureEndTsc << " sensor-frame=";
@@ -621,13 +623,17 @@ void printFrame(const Channel& channel, const sgmix::Frame& frame) {
         };
         printValues("exposure-s", metadata.exposureTimesSeconds);
     }
-    if (frame.embeddedMetadata) {
-        const auto& metadata = *frame.embeddedMetadata;
-        std::cout << " ebd-bytes=" << metadata.raw.size();
-        if (metadata.exposureLines)
-            std::cout << " exposure-lines=" << *metadata.exposureLines;
-        if (metadata.exposureTimeSeconds)
-            std::cout << " exposure-s=" << *metadata.exposureTimeSeconds;
+    if (frame.v4l2Metadata) {
+        const auto& metadata = *frame.v4l2Metadata;
+        if (metadata.ptsNanoseconds)
+            std::cout << " pts-ns=" << *metadata.ptsNanoseconds;
+        if (metadata.topLines) {
+            std::cout << " ebd-bytes=" << metadata.raw.size();
+            if (metadata.exposureLines)
+                std::cout << " exposure-lines=" << *metadata.exposureLines;
+            if (!metadata.exposureTimesSeconds.empty())
+                std::cout << " exposure-s=" << metadata.exposureTimesSeconds.front();
+        }
     }
     std::cout << '\n';
 }
@@ -659,7 +665,9 @@ void capture(std::vector<Channel>& channels, const Options& options) {
                     std::string error;
                     for (std::uint64_t count = 0; !stop.load() && !stopRequested.load() &&
                          (!options.frames || count < options.frames); ++count) {
-                        if (!current->camera->SG_GetFrame(*current->frame, 3000, error)) {
+                        // Preset cameras can take several seconds to deliver their first frame.
+                        const auto timeoutMs = count == 0 ? 10000U : 3000U;
+                        if (!current->camera->SG_GetFrame(*current->frame, timeoutMs, error)) {
                             if (stop.load() || stopRequested.load())
                                 break;
                             throw std::runtime_error(error);
@@ -667,8 +675,8 @@ void capture(std::vector<Channel>& channels, const Options& options) {
                         if (stop.load() || stopRequested.load())
                             break;
                         if (options.capture.embeddedTopLines &&
-                            (!current->frame->embeddedMetadata || !current->frame->embeddedMetadata->exposureLines))
-                            throw std::runtime_error("--isx031-ebd requires a supported ISX031 model and a valid first EBD row");
+                            (!current->frame->v4l2Metadata || !current->frame->v4l2Metadata->exposureLines))
+                            throw std::runtime_error("--isx031-ebd requires a supported ISX031 or S36 camera with a valid first EBD row");
                         auto* image = &current->frame;
                         if (options.sipl && options.correct) {
                             if ((*image)->pixelFormat != Format::Nv12) {

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace sgmix {
@@ -17,9 +18,10 @@ namespace sgmix {
  *
  *   CameraControl API              Direction     Type
  *   ------------------------------------------------------------------
- *   SG_Init                        input         CameraConfig
+ *   SG_Init                        input         CameraInitConfig
  *   SG_StartCapture                input         CaptureConfig
  *   SG_GetFrame                    output        Frame
+ *   SG_GetCameraTriggerMode        output        SensorTriggerMode
  *   SG_GetDeviceInfo               output        DeviceInfo
  *   SG_GetImageInfo                output        ImageInfo
  *   SG_GetCalibration              output        CameraCalibration
@@ -44,6 +46,13 @@ enum class Platform : std::uint8_t {
 
 /** @brief Camera selection and optional low-level route overrides. */
 struct CameraConfig {
+    /// Requested trigger configuration for NVIDIA V4L2 capture.
+    enum class TriggerMode : std::uint8_t {
+        Default,      ///< Leave the driver's current configuration in place.
+        FreeRun,      ///< Select camera master mode.
+        ExternalSync, ///< Select camera slave mode. The board must receive FSYNC pulses.
+    };
+
     /**
      * Camera model name. If empty, SG_Init loads the model mapped to videoDevice
      * in /opt/sgMIX/etc/sgmix.conf (V4L2 only).
@@ -51,19 +60,23 @@ struct CameraConfig {
      * Supported camera names:
      *   - "SG3S-ISX031C-GMSL2F-Hxxx"
      *   - "SG3S-ISX031C-GMSL2-Hxxx"
-     *   - "SHW2GY" (AR0820 / GW5; the previous AR0820 model name is accepted)
+     *   - "SYF2G"
+     *   - "SYW2G"
      *   - "SHW3G"
      *   - "S56"
-     *   - "SHW5G" (shares the S56 control backend)
+     *   - "S56C"
+     *   - "S56D"
+     *   - "S56DY"
+     *   - "SHW5G"
+     *   - "SHF5G"
      *   - "S36"
-     *   - "SDT2BCO1" (legacy spelling "SDT2BC01" is accepted)
-     *
-     * Stored-data reads and capture only (no ISP control or firmware update):
-     *   - "SG3S11AFLK", "SHF3L", "SHF3H": ISX031 with integrated ISP / Flash data
-     *   - "SG8-ISX028C-G2G-Hxxx": ISX028 with integrated ISP / EEPROM data
-     *     (the previous name "ISX028" is accepted)
-     *
-     * SIPL requires a matching driver and JSON configuration for every model.
+     *   - "S36A"
+     *   - "SDT2BCO1"
+     *   - "SG3S11AFLK"
+     *   - "SYF3L"
+     *   - "SHF3L"
+     *   - "M3A"
+     *   - "SHF3H"
      *
      * Maintenance/compatibility names (not physical camera model names):
      *   - "GW5_DEVICE"
@@ -74,12 +87,28 @@ struct CameraConfig {
     std::string videoDevice;
     Platform platform = Platform::Auto;
 
-    // Each value is an independent override. An omitted bus is discovered
-    // from the video device; omitted addresses use discovery/defaults.
+    // Optional I2C overrides. Leave unset to use the detected route.
+    // Addresses are host-visible 7-bit values.
     std::optional<int> i2cBus;
     std::optional<std::uint8_t> sensorI2cAddress;
     std::optional<std::uint8_t> eepromI2cAddress;
+
+    // Applied before streaming by SG_StartCapture. SIPL selects FSYNC in its JSON.
+    TriggerMode triggerMode = TriggerMode::Default;
 };
+
+/** @brief SIPL camera selection for CameraControl::SG_Init. */
+struct SiplCameraConfig {
+    // An empty path uses the saved SIPL configuration for omitted settings.
+    std::string jsonPath;
+    std::string configName;
+    // Masks in transport order. Empty with an explicit JSON path uses all configured links.
+    std::vector<std::uint32_t> linkMasks;
+    // Zero-based CAM connector. Leave unset to bind the only enabled sensor.
+    std::optional<std::uint32_t> cameraPort;
+};
+
+using CameraInitConfig = std::variant<CameraConfig, SiplCameraConfig>;
 
 // =============================================================================
 // Capture -- input/output for CameraControl frame operations
@@ -97,22 +126,25 @@ struct SiplFrameMetadata {
     std::vector<std::uint8_t> embeddedDataTop{};
     std::vector<std::uint8_t> embeddedDataBottom{};
     // Driver-parsed exposure times; empty when the block is invalid.
-    std::vector<float> exposureTimesSeconds{};
+    std::vector<double> exposureTimesSeconds{};
     // Driver-reported exposure count, independent of exposure-time validity.
     // The exposure-time vector is bounded by the SIPL array capacity.
     std::uint32_t numExposures = 0;
 };
 
-/** @brief Owned top-row EBD copied from the same V4L2 sample as the image. */
-struct EmbeddedFrameMetadata {
+/** @brief V4L2/Argus metadata copied from the same sample as the image. */
+struct V4l2FrameMetadata {
+    // Pipeline PTS in nanoseconds, when available.
+    std::optional<std::uint64_t> ptsNanoseconds;
+
     std::vector<std::uint8_t> raw;
     std::uint32_t topLines = 0;
     // Bytes per copied row; source buffer padding is excluded.
     std::size_t rowBytes = 0;
     // Legacy ISX031 layout only: little-endian exposure lines at offsets 30..32.
     std::optional<std::uint32_t> exposureLines;
-    // ISX031 legacy 210 MHz timing; present when a valid HMAX is available.
-    std::optional<double> exposureTimeSeconds;
+    // ISX031 exposure time in seconds. Empty when timing is unavailable.
+    std::vector<double> exposureTimesSeconds;
 };
 
 /** @brief Owned CPU image with tightly packed rows and explicit plane offsets. */
@@ -139,32 +171,22 @@ struct Frame {
 
     // Delivered-frame counter, reset on each successful capture start.
     std::uint64_t sequence = 0;
-    // Original pipeline PTS, when present. Not a Unix or exposure timestamp.
-    std::optional<std::uint64_t> ptsNanoseconds;
     // Host system clock when SG_GetFrame receives the sample (Unix microseconds).
     std::int64_t hostTimestampMicroseconds = 0;
     // Present for successfully delivered SIPL frames only.
     std::optional<SiplFrameMetadata> siplMetadata;
-    // Present only when V4L2 top-row EBD extraction was explicitly enabled.
-    std::optional<EmbeddedFrameMetadata> embeddedMetadata;
+    // Present for successfully delivered V4L2/Argus frames. EBD fields may be empty.
+    std::optional<V4l2FrameMetadata> v4l2Metadata;
 };
 
 /** @brief Capture constraints; omitted dimensions normally use source negotiation. */
 struct CaptureConfig {
-    enum class Source : std::uint8_t {
-        V4l2,
-        Argus,
-    };
-
-    Source source = Source::V4l2;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t framesPerSecond = 0;
     // V4L2 input format is negotiated automatically as UYVY/YUYV/NV12.
     // Empty preserves the native format (NV12 for Argus); BGR conversion is optional.
     std::optional<Frame::PixelFormat> outputFormat;
-    // Argus requires an explicit sensor-id; never inferred from /dev/videoN.
-    std::optional<std::uint32_t> argusSensorId;
 
     // Read mono calibration once and return corrected NV12 from SG_GetFrame.
     // Requires a VPI-enabled SDK. First frame includes lazy CUDA initialization;
@@ -182,6 +204,21 @@ struct CaptureConfig {
     // returned Frame height excludes them. Zero keeps existing behavior.
     // Leave outputFormat empty; convert the image after EBD extraction.
     std::uint32_t embeddedTopLines = 0;
+};
+
+/** @brief Primary sensor synchronization mode returned by SG_GetCameraTriggerMode(). */
+enum class SensorTriggerMode : std::uint8_t {
+    /// The current mode could not be determined.
+    Unknown,
+
+    /// The sensor uses its internal timing to produce frames.
+    InternalSync,
+
+    /// External pulses synchronize the sensor's image readout timing.
+    ExternalPulseSync,
+
+    /// An external trigger controls when the sensor starts exposure.
+    ShutterTrigger,
 };
 
 // =============================================================================
@@ -203,7 +240,7 @@ struct DeviceInfo {
 
     struct Component {
         std::string chip; // Empty when the chip model is unknown.
-        std::optional<std::uint8_t> id; // Raw EEPROM component ID.
+        std::optional<std::uint8_t> id; // Component ID from module storage.
         std::optional<I2cEndpoint> endpoint;
         Location location = Location::Module;
     };
@@ -215,29 +252,27 @@ struct DeviceInfo {
     };
 
     struct Lens {
-        std::uint8_t fieldOfViewDegrees = 0;       // EEPROM 0x0020
-        float focalLengthMillimeters = 0.0F;       // EEPROM 0x0021-0x0024
-        float fNumber = 0.0F;                      // EEPROM 0x0025-0x0028
-        char manufacturerId = '\0';                // EEPROM 0x0029
-        std::uint8_t index = 0;                    // EEPROM 0x002A
-        LensType type = LensType::Unknown;         // EEPROM 0x002B
-        // 0x002C-0x003B reserved; CRC32_2 is stored at 0x003C-0x003F.
+        std::uint8_t fieldOfViewDegrees = 0;       // 0x0020
+        float focalLengthMillimeters = 0.0F;       // 0x0021-0x0024
+        float fNumber = 0.0F;                      // 0x0025-0x0028
+        char manufacturerId = '\0';                // 0x0029
+        std::uint8_t index = 0;                    // 0x002A
+        LensType type = LensType::Unknown;         // 0x002B
     };
 
     std::string model;
     std::string videoDevice;
     Platform platform = Platform::Auto;
 
-    Component sensor; // `chip` is decoded from Sensor ID at EEPROM 0x0000.
+    Component sensor; // 0x0000
     std::optional<Component> eeprom;
-    std::optional<Component> isp; // `chip` is decoded from ISP ID at EEPROM 0x0001.
+    std::optional<Component> isp; // 0x0001
     std::optional<Component> serializer;
     std::optional<Component> deserializer;
     std::optional<Lens> lens;
 
-    // EEPROM 0x0120-0x0140; unused bytes are 0xFF. CRC32_5 at 0x0141-0x0144
-    // covers only valid SN characters; terminator and padding are excluded.
-    std::optional<std::string> serialNumber;
+    // Unused serial number bytes are 0xFF.
+    std::optional<std::string> serialNumber; // 0x0120-0x0140
 
     bool ispControlSupported = false;
     bool firmwareUpdateSupported = false;
@@ -255,19 +290,21 @@ struct ImageInfo {
         Uyvy = 0x02,
     };
 
+    /// Trigger flag stored in the module image configuration.
     enum class TriggerMode : std::uint8_t {
         Unknown = 0x00,
         Enabled = 0x01,
         Disabled = 0x02,
     };
 
-    std::uint16_t width = 0;                       // EEPROM 0x0002-0x0003, little-endian
-    std::uint16_t height = 0;                      // EEPROM 0x0004-0x0005, little-endian
-    std::uint16_t framesPerSecond = 0;             // EEPROM 0x0006 (stored as uint8_t)
-    PixelFormat pixelFormat = PixelFormat::Unknown;// EEPROM 0x0007
-    TriggerMode triggerMode = TriggerMode::Unknown;// EEPROM 0x0008
-    bool embeddedDataEnabled = false;              // EEPROM 0x0009
-    // Sensor ID: 0x0000; ISP ID: 0x0001; CRC32_1: 0x001C-0x001F.
+    // Width and height are stored in little-endian order.
+    std::uint16_t width = 0;                        // 0x0002-0x0003
+    std::uint16_t height = 0;                       // 0x0004-0x0005
+    // The stored frame rate occupies one byte.
+    std::uint16_t framesPerSecond = 0;              // 0x0006
+    PixelFormat pixelFormat = PixelFormat::Unknown; // 0x0007
+    TriggerMode triggerMode = TriggerMode::Unknown; // 0x0008
+    bool embeddedDataEnabled = false;               // 0x0009
 };
 
 // =============================================================================
@@ -289,17 +326,15 @@ struct CameraCalibration {
 
     /** @brief Intrinsic parameters for one camera sensor. */
     struct Intrinsics {
-        // Width/height/model exist once in the shared block at 0x0060-0x0064.
-        std::uint16_t width = 0;                   // EEPROM 0x0060-0x0061
-        std::uint16_t height = 0;                  // EEPROM 0x0062-0x0063
-        Model model = Model::Unknown;              // EEPROM 0x0064
+        std::uint16_t width = 0;                   // 0x0060-0x0061
+        std::uint16_t height = 0;                  // 0x0062-0x0063
+        Model model = Model::Unknown;              // 0x0064
 
         double fx = 0.0; // Left 0x0065; right 0x0160
         double fy = 0.0; // Left 0x006D; right 0x0168
         double cx = 0.0; // Left 0x0075; right 0x0170
         double cy = 0.0; // Left 0x007D; right 0x0178
 
-        // Shared distortion slots. Their meaning depends on `model`.
         double k1 = 0.0; // Left 0x0085; right 0x0180
         double k2 = 0.0; // Left 0x008D; right 0x0188
         double p1 = 0.0; // Left 0x0095; right 0x0190
@@ -317,18 +352,15 @@ struct CameraCalibration {
         // Used by C'Mei/Omni/Double-Sphere model families as applicable.
         double xi = 0.0;    // Left 0x00E5; right 0x01E0
         double alpha = 0.0; // Left 0x00ED; right 0x01E8
-        // Left reserve: 0x00F5-0x011B, CRC32_4: 0x011C-0x011F.
-        // Right reserve: 0x01F0-0x0216, CRC32_6: 0x0217-0x021A.
     };
 
     /** @brief Stereo transform from one camera coordinate system to the other. */
     struct Extrinsics {
-        std::array<double, 9> rotation{};    // EEPROM 0x0220-0x0267, row-major
-        std::array<double, 3> translation{}; // EEPROM 0x0268-0x027F, millimetres
-        // CRC32_7: 0x0280-0x0283.
+        std::array<double, 9> rotation{};    // 0x0220-0x0267
+        std::array<double, 3> translation{}; // 0x0268-0x027F
     };
 
-    std::optional<float> reprojectionErrorPixels; // EEPROM 0x0040-0x0043; CRC32_3: 0x005C-0x005F
+    std::optional<float> reprojectionErrorPixels; // 0x0040-0x0043
     Intrinsics left;
     std::optional<Intrinsics> right;
     std::optional<Extrinsics> stereo;
@@ -336,13 +368,9 @@ struct CameraCalibration {
 
 // =============================================================================
 // IMU calibration -- output from SG_GetImuCalibration
-//
-// EEPROM stores each value as a little-endian IEEE-754 double. Addresses below
-// describe the storage protocol; CRC values themselves are verified internally.
 // =============================================================================
 
 struct ImuCalibration {
-    // CRC32_8 covers EEPROM 0x02A0-0x0387; checksum at 0x0388-0x038B.
     double gyr_n_x;             // 0x02A0
     double gyr_w_x;             // 0x02A8
     double gyr_n_y;             // 0x02B0
@@ -370,12 +398,12 @@ struct ImuCalibration {
     double T_cam_imu_R2_0;
     double T_cam_imu_R2_1;
     double T_cam_imu_R2_2;      // 0x0360
-    double T_cam_imu_T0;        // 0x0368, metres
-    double T_cam_imu_T1;        // 0x0370, metres
-    double T_cam_imu_T2;        // 0x0378, metres
-    double Timeshift_cam_imu;   // 0x0380, seconds
+    // Camera-to-IMU translation is in metres. The time shift is in seconds.
+    double T_cam_imu_T0;        // 0x0368
+    double T_cam_imu_T1;        // 0x0370
+    double T_cam_imu_T2;        // 0x0378
+    double Timeshift_cam_imu;   // 0x0380
 
-    // CRC32_9 covers EEPROM 0x0390-0x050F; checksum at 0x0510-0x0513.
     double gyro_bias_x;         // 0x0390
     double gyro_bias_y;
     double gyro_bias_z;         // 0x03A0

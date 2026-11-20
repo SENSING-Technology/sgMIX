@@ -1,0 +1,50 @@
+{
+  // S36 双目模组：2x Sony ISX031，YUV422/UYVY 直出（ICP 路径，不经过 ISP）
+  "name": "s36",
+  "description": "S36 双目模组（2x Sony ISX031，YUV422/UYVY 直出，走 ICP 路径，不经过 ISP）",
+
+  // 输出路径：icp_yuv = YUV 模组 ICP 直出 UYVY（CPU 转 BGR）；isp = RAW 模组走 ISP0 硬件 ISP
+  "output": "icp_yuv",
+
+  // 采集后端：
+  //   auto = 运行时自动探测（推荐）。检测 /usr/lib/nvsipl_drv/libnvuddf_s36_*.so
+  //          （SIPL 驱动包）→ 走 SIPL；否则检测 /dev/videoN（GMSL2x8 驱动包）→ 走 V4L2。
+  //          两个驱动包互斥，同一时刻系统只会装其一，故探测可靠。
+  //   sipl = 强制 SIPL 用户态（需 SIPL 驱动包已 install.sh）
+  //   v4l2 = 强制内核节点（需 GMSL2x8 驱动包已 install.sh + load_modules.sh）
+  // 也可用命令行 --backend sipl|v4l2|auto 临时代替此字段
+  "backend": "auto",
+
+  // 平台查询 json（相对 SDK 根目录）与其中 SensorSystemConfig 的名称
+  "sipl_json": "sipl/s36.json",
+  "sipl_config": "S36_2CH_1920X1536_30FPS",
+
+  // 传感器原生采集分辨率与帧率
+  "capture_width": 1920,
+  "capture_height": 1536,
+  "fps": 30,
+
+  // 期望的标定模型类型（仅提示性校验）：pinhole / fisheye
+  "calib_type": "pinhole",
+
+  // pipeline0/1 与标定文件左/右目的对应关系（由模组内部 GMSL 接线决定）：
+  // true  = pipeline0 是物理右目，路由时需交换（如 s56c，2026-09-20 极线实测）
+  // false = pipeline0 是物理左目，无需交换（s36 实测，2026-10-28 离线推理判定）
+  // 判定方法：--capture-test 采帧后，两种左右顺序分别离线推理，
+  //           视差图空间结构连贯（远小近大、平滑）的顺序即正确
+  "swap_lr": false,
+
+  // GMSL 端口名 → link 掩码 [Transport0(AB), Transport1(CD)]
+  // cam0=[0x0000,0x0001] cam1=[0x0000,0x0002] cam2=[0x0000,0x0100] cam3=[0x0000,0x0200]
+  // cam4=[0x0001,0x0000] cam5=[0x0002,0x0000] cam6=[0x0100,0x0000] cam7=[0x0200,0x0000]
+  "ports": {
+    "cam0": ["0x0000", "0x0001"],
+    "cam1": ["0x0000", "0x0002"],
+    "cam2": ["0x0000", "0x0100"],
+    "cam3": ["0x0000", "0x0200"],
+    "cam4": ["0x0001", "0x0000"],
+    "cam5": ["0x0002", "0x0000"],
+    "cam6": ["0x0100", "0x0000"],
+    "cam7": ["0x0200", "0x0000"]
+  }
+}

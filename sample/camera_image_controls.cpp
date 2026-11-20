@@ -37,16 +37,15 @@ void checkpoint() {
 
 struct Options {
     std::string video;
-    std::optional<std::uint32_t> argusSensorId;
     std::uint32_t port = UINT32_MAX, channel = 0;
     bool help = false;
 };
 void usage(const char* program) {
-    std::cout << "Usage: " << program << " --v4l2 --video /dev/videoN [--argus] image\n"
+    std::cout << "Usage: " << program << " --v4l2 --video /dev/videoN image\n"
               << "       " << program << " --sipl [--cam PORT] [--channel CHANNEL] image\n"
               << "Put image last.\n"
               << "image: Flip/Mirror/Testpattern Get/Set with live preview.\n"
-              << "--argus selects NVIDIA Argus; /dev/videoN maps to sensor-id N.\n"
+              << "RAW models use Argus automatically; /dev/videoN maps to sensor-id N.\n"
               << "SIPL channel defaults to 0. Omit PORT only for one enabled sensor.\n"
               << "Each test value is displayed for 3 seconds; attempts to restore initial API values.\n";
 }
@@ -74,7 +73,6 @@ Options parse(int argc, char** argv) {
         std::string key = argv[i];
         if (!seen.insert(key).second)
             throw std::invalid_argument("Repeated option: " + key);
-        if (!sipl && key == "--argus") continue;
         if (i + 1 >= argc - 1 || std::string(argv[i + 1]).empty() ||
             std::string(argv[i + 1]).rfind("--", 0) == 0)
             throw std::invalid_argument("Missing value for " + key);
@@ -94,8 +92,6 @@ Options parse(int argc, char** argv) {
     }
     if (!sipl && result.video.empty())
         throw std::invalid_argument("--v4l2 requires --video /dev/videoN");
-    if (!sipl && seen.count("--argus"))
-        result.argusSensorId = number(result.video.substr(10));
     if (sipl && seen.count("--channel") && result.port == UINT32_MAX)
         throw std::invalid_argument("--channel requires an explicit --cam");
     return result;
@@ -409,14 +405,12 @@ int main(int argc, char** argv) {
         bool initialized;
         if (options.video.empty()) {
             capture.siplChannel = options.channel;
-            initialized = camera.SG_Init("","",error,{},options.port);
+            sgmix::SiplCameraConfig device;
+            device.cameraPort = options.port;
+            initialized = camera.SG_Init(device, error);
         } else {
             sgmix::CameraConfig device;
             device.videoDevice = options.video;
-            if (options.argusSensorId) {
-                capture.source = sgmix::CaptureConfig::Source::Argus;
-                capture.argusSensorId = options.argusSensorId;
-            }
             initialized = camera.SG_Init(device,error);
         }
         if (!initialized) throw std::runtime_error("SG_Init: "+diagnostic(error));

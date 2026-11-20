@@ -50,7 +50,9 @@ int main(int argc, char** argv) {
     };
     try {
         // Load saved JSON, config name and masks; PORT selects an enabled Driver CAM.
-        check(camera.SG_Init("", "", error, {}, port), "SG_Init");
+        sgmix::SiplCameraConfig device;
+        device.cameraPort = port;
+        check(camera.SG_Init(device, error), "SG_Init");
 
         sgmix::CaptureConfig capture;
         // Start before controls: SIPL opens the sensor control path during capture.

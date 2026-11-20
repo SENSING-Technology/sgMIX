@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -56,6 +57,7 @@ void PrintUsage(const char* program) {
         << "  get-sn                      Read the serial number\n"
         << "  get-resolution              Read the stored resolution\n"
         << "  get-image                   Read image configuration\n"
+        << "  get-trigger-mode            Read live trigger mode (mono ISX031)\n"
         << "  get-calibration             Read camera calibration\n"
         << "  get-imu                     Read IMU calibration\n"
         << "Options\n"
@@ -121,7 +123,8 @@ const char* CalibrationModelName(sgmix::CameraCalibration::Model model) {
 void PrintError(const char* api, const std::string& error) {
     std::cerr << api << " failed";
     if (!error.empty()) {
-        std::cerr << ": " << error;
+        static const std::regex crcField("CRC32_[0-9]+");
+        std::cerr << ": " << std::regex_replace(error, crcField, "CRC");
     }
     std::cerr << '\n';
 }
@@ -129,11 +132,6 @@ void PrintError(const char* api, const std::string& error) {
 template <typename T>
 void PrintField(const char* name, const T& value) {
     std::cout << std::left << std::setw(24) << name << ": " << value << '\n';
-}
-
-template <typename T>
-void PrintNestedField(const char* name, const T& value) {
-    std::cout << "  " << std::left << std::setw(18) << name << ": " << value << '\n';
 }
 
 const char* PixelFormatName(sgmix::ImageInfo::PixelFormat value) {
@@ -156,6 +154,17 @@ const char* TriggerModeName(sgmix::ImageInfo::TriggerMode value) {
     return "Unknown";
 }
 
+const char* SensorTriggerModeName(sgmix::SensorTriggerMode mode) {
+    using Mode = sgmix::SensorTriggerMode;
+    switch (mode) {
+    case Mode::Unknown: return "Unknown";
+    case Mode::InternalSync: return "InternalSync";
+    case Mode::ExternalPulseSync: return "ExternalPulseSync";
+    case Mode::ShutterTrigger: return "ShutterTrigger";
+    }
+    return "Unknown";
+}
+
 struct OutputContext {
     bool sipl = false;
     std::uint32_t port = UINT32_MAX;
@@ -164,6 +173,7 @@ struct OutputContext {
 };
 
 OutputContext outputContext;
+const std::string kCameraData = "Camera Data";
 constexpr const char* kUnavailable = "Unavailable (blank or invalid)";
 
 std::string Hex(unsigned value) {
@@ -189,14 +199,6 @@ std::string Number(float value) {
     return text.str();
 }
 
-std::string StorageSource(const sgmix::DeviceInfo* device = nullptr) {
-    const auto& model = device && !device->model.empty() ? device->model : outputContext.model;
-    if (model.empty()) return "Camera Storage"; // The SDK did not resolve the storage identity.
-    return model == "SG3S-ISX031C-GMSL2-Hxxx" || model == "SG3S-ISX031C-GMSL2F-Hxxx" ||
-           model == "SG3S11AFLK" || model == "SHF3L" || model == "SHF3H"
-        ? "Sensor Flash" : "EEPROM";
-}
-
 void PrintSection(const std::string& source, const char* name) {
     std::cout << '\n' << '[' << source << " - " << name << "]\n";
 }
@@ -205,9 +207,8 @@ void PrintStored(const char* name, const std::string& value, const std::string& 
     PrintField(name, value + (verboseOutput ? "  [" + member + ']' : ""));
 }
 
-void PrintCrc(unsigned index, bool passed) {
-    const auto label = "CRC32_" + std::to_string(index) + " check";
-    PrintField(label.c_str(), passed ? "PASS" : "Unavailable");
+void PrintCrc(bool passed) {
+    PrintField("CRC", passed ? "PASS" : "Unavailable");
 }
 
 void PrintRuntime(const sgmix::DeviceInfo* info) {
@@ -249,7 +250,7 @@ void PrintCameraInfo(const std::string& storage, const sgmix::DeviceInfo* device
     }
     // GetDeviceInfo does not expose a separate Camera Info CRC result.
     const bool validIds = device && device->sensor.id && device->isp && device->isp->id;
-    PrintCrc(1, !imageReadFailed && (image || validIds));
+    PrintCrc(!imageReadFailed && (image || validIds));
 }
 
 void PrintLens(const std::string& storage, const sgmix::DeviceInfo* info) {
@@ -267,15 +268,14 @@ void PrintLens(const std::string& storage, const sgmix::DeviceInfo* info) {
                           lens.type == sgmix::DeviceInfo::LensType::Threaded ? "Threaded" : "Unknown";
         PrintStored("Lens Type", std::string(name) + " (" + Hex(static_cast<unsigned>(lens.type)) + ")", "DeviceInfo.lens->type");
     } else PrintField("Status", kUnavailable);
-    PrintCrc(2, info && info->lens);
+    PrintCrc(info && info->lens);
 }
 
-void PrintRms(const std::string& storage, const sgmix::CameraCalibration* value, bool inputFile = false) {
+void PrintRms(const std::string& storage, const sgmix::CameraCalibration* value) {
     PrintSection(storage, "RMS Info");
     PrintStored("RMS", value && value->reprojectionErrorPixels
                 ? Number(*value->reprojectionErrorPixels) + " px" : kUnavailable, "CameraCalibration.reprojectionErrorPixels");
-    if (inputFile) PrintField("CRC32_3 check", "Not checked - input file");
-    else PrintCrc(3, value && value->reprojectionErrorPixels);
+    PrintCrc(value && value->reprojectionErrorPixels);
 }
 
 void PrintIntrinsics(const char* side, const sgmix::CameraCalibration::Intrinsics& value) {
@@ -314,7 +314,7 @@ void PrintIntrinsics(const char* side, const sgmix::CameraCalibration::Intrinsic
     }
 }
 
-void PrintLeft(const std::string& storage, const sgmix::CameraCalibration* value, bool inputFile = false) {
+void PrintLeft(const std::string& storage, const sgmix::CameraCalibration* value) {
     PrintSection(storage, "Cam0 - Left Camera");
     if (value) {
         PrintStored("Image Width", std::to_string(value->left.width) + " px",
@@ -325,29 +325,27 @@ void PrintLeft(const std::string& storage, const sgmix::CameraCalibration* value
                     Hex(static_cast<unsigned>(value->left.model)) + ")", "CameraCalibration.left.model");
         PrintIntrinsics("left", value->left);
     } else PrintField("Status", "Read failed");
-    if (inputFile) PrintField("CRC32_4 check", "Not checked - input file");
-    else PrintCrc(4, value != nullptr);
+    PrintCrc(value != nullptr);
 }
 
 void PrintSerial(const std::string& storage, const std::string* serial) {
     PrintSection(storage, "SN");
     PrintStored("Serial Number", serial ? *serial : kUnavailable,
                 "SG_GetCameraSerialNumber / DeviceInfo.serialNumber");
-    PrintCrc(5, serial != nullptr);
+    PrintCrc(serial != nullptr);
 }
 
-void PrintRight(const std::string& storage, const sgmix::CameraCalibration* value, bool inputFile = false) {
+void PrintRight(const std::string& storage, const sgmix::CameraCalibration* value) {
     PrintSection(storage, "Cam1 - Right Camera");
     if (value && value->right) PrintIntrinsics("right", *value->right);
     else {
         PrintField("Intrinsics", kUnavailable);
         PrintField("Distortion", kUnavailable);
     }
-    if (inputFile) PrintField("CRC32_6 check", "Not checked - input file");
-    else PrintCrc(6, value && value->right);
+    PrintCrc(value && value->right);
 }
 
-void PrintStereo(const std::string& storage, const sgmix::CameraCalibration* value, bool inputFile = false) {
+void PrintStereo(const std::string& storage, const sgmix::CameraCalibration* value) {
     PrintSection(storage, "Stereo Extrinsics");
     if (value && value->stereo) {
         for (unsigned i = 0; i < 9; ++i) {
@@ -360,16 +358,10 @@ void PrintStereo(const std::string& storage, const sgmix::CameraCalibration* val
             PrintStored(labels[i], Number(value->stereo->translation[i]) + " mm",
                         "CameraCalibration.stereo->translation[" + std::to_string(i) + ']');
     } else { PrintField("R", kUnavailable); PrintField("T", kUnavailable); }
-    if (inputFile) PrintField("CRC32_7 check", "Not checked - input file");
-    else PrintCrc(7, value && value->stereo);
+    PrintCrc(value && value->stereo);
 }
 
-// IMU always uses EEPROM in V4L2. In SIPL it uses the selected storage reader.
-std::string ImuSource(const std::string& primary) {
-    return outputContext.sipl ? primary : "EEPROM";
-}
-
-void PrintImuData(const std::string& storage, const sgmix::ImuCalibration* value, bool erased, bool inputFile = false) {
+void PrintImuData(const std::string& storage, const sgmix::ImuCalibration* value, bool erased) {
     const char* status = erased ? "NOT PROGRAMMED" : "Read failed";
     PrintSection(storage, "IMU - Camera / IMU Calibration");
     if (!value) {
@@ -412,9 +404,8 @@ void PrintImuData(const std::string& storage, const sgmix::ImuCalibration* value
         std::cout << "\n  Timeshift_cam_imu:\n";
         PrintStored("Timeshift_cam_imu", Number(value->Timeshift_cam_imu) + " s", "ImuCalibration.Timeshift_cam_imu");
     }
-    if (inputFile) PrintField("CRC32_8 check", "Not checked - input file");
-    else if (erased) PrintField("CRC32_8 check", "Not checked - erased");
-    else PrintCrc(8, value != nullptr);
+    if (erased) PrintField("CRC", "Not checked - erased");
+    else PrintCrc(value != nullptr);
     PrintSection(storage, "IMU - Factory Calibration");
     if (!value) {
         for (const char* group : {"Gyro Bias", "Gyro K Matrix", "Gyro Scale", "Gyro Misalignment",
@@ -478,9 +469,8 @@ void PrintImuData(const std::string& storage, const sgmix::ImuCalibration* value
         PrintStored("acc_M2_1", Number(value->acc_M2_1), "ImuCalibration.acc_M2_1");
         PrintStored("acc_M2_2", Number(value->acc_M2_2), "ImuCalibration.acc_M2_2");
     }
-    if (inputFile) PrintField("CRC32_9 check", "Not checked - input file");
-    else if (erased) PrintField("CRC32_9 check", "Not checked - erased");
-    else PrintCrc(9, value != nullptr);
+    if (erased) PrintField("CRC", "Not checked - erased");
+    else PrintCrc(value != nullptr);
 }
 
 void PrintCapabilities(const sgmix::DeviceInfo* info, const sgmix::CameraCalibration* calibration = nullptr) {
@@ -491,26 +481,24 @@ void PrintCapabilities(const sgmix::DeviceInfo* info, const sgmix::CameraCalibra
 }
 
 void PrintDeviceInfo(const sgmix::DeviceInfo& info) {
-    const auto storage = StorageSource(&info);
     PrintRuntime(&info);
-    PrintCameraInfo(storage, &info, nullptr);
-    PrintLens(storage, &info);
-    PrintSerial(storage, info.serialNumber ? &*info.serialNumber : nullptr);
+    PrintCameraInfo(kCameraData, &info, nullptr);
+    PrintLens(kCameraData, &info);
+    PrintSerial(kCameraData, info.serialNumber ? &*info.serialNumber : nullptr);
     PrintCapabilities(&info);
 }
 
-void PrintCalibration(const sgmix::CameraCalibration& value, bool inputFile = false) {
-    const auto storage = inputFile ? std::string("Input File") : StorageSource();
-    PrintRms(storage, &value, inputFile);
-    PrintLeft(storage, &value, inputFile);
-    PrintRight(storage, &value, inputFile);
-    PrintStereo(storage, &value, inputFile);
+void PrintCalibration(const sgmix::CameraCalibration& value) {
+    PrintRms(kCameraData, &value);
+    PrintLeft(kCameraData, &value);
+    PrintRight(kCameraData, &value);
+    PrintStereo(kCameraData, &value);
     PrintSection("SDK Results", "Derived Status");
     PrintField("Calibration Type", value.right ? "Stereo" : "Monocular");
 }
 
-void PrintImuCalibration(const sgmix::ImuCalibration& value, bool inputFile = false) {
-    PrintImuData(inputFile ? "Input File" : ImuSource(StorageSource()), &value, false, inputFile);
+void PrintImuCalibration(const sgmix::ImuCalibration& value) {
+    PrintImuData(kCameraData, &value, false);
 }
 
 bool GetDeviceInfo(sgmix::CameraControl& camera) {
@@ -540,7 +528,7 @@ bool GetImageInfo(sgmix::CameraControl& camera) {
     sgmix::ImageInfo info;
     std::string error;
     if (!camera.SG_GetImageInfo(info, error)) { PrintError("SG_GetImageInfo", error); return false; }
-    PrintCameraInfo(StorageSource(), nullptr, &info);
+    PrintCameraInfo(kCameraData, nullptr, &info);
     return true;
 }
 
@@ -552,12 +540,20 @@ bool GetCalibration(sgmix::CameraControl& camera) {
     return true;
 }
 
+bool GetTriggerMode(sgmix::CameraControl& camera) {
+    sgmix::SensorTriggerMode mode = sgmix::SensorTriggerMode::Unknown;
+    std::string error;
+    if (!camera.SG_GetCameraTriggerMode(mode, error)) { PrintError("SG_GetCameraTriggerMode", error); return false; }
+    PrintField("Sensor Trigger Mode", SensorTriggerModeName(mode));
+    return true;
+}
+
 bool GetImuCalibration(sgmix::CameraControl& camera) {
     sgmix::ImuCalibration value{};
     std::string error;
     if (!camera.SG_GetImuCalibration(value, error)) {
         if (error == "IMU calibration is not programmed") {
-            PrintImuData(ImuSource(StorageSource()), nullptr, true);
+            PrintImuData(kCameraData, nullptr, true);
             return true;
         }
         PrintError("SG_GetImuCalibration", error);
@@ -582,22 +578,29 @@ bool GetAll(sgmix::CameraControl& camera) {
     ReadResult<sgmix::ImageInfo> image;
     ReadResult<sgmix::CameraCalibration> calibration;
     ReadResult<sgmix::ImuCalibration> imu;
-    // Collect every existing read independently before printing in storage order.
+    ReadResult<sgmix::SensorTriggerMode> trigger;
+    // Collect reads independently before printing the report.
     device.ok = camera.SG_GetDeviceInfo(device.value, device.error);
     serial.ok = camera.SG_GetCameraSerialNumber(serial.value, serial.error);
     resolution.ok = camera.SG_GetCameraResolution(resolution.value.width, resolution.value.height, resolution.error);
     image.ok = camera.SG_GetImageInfo(image.value, image.error);
     calibration.ok = camera.SG_GetCalibration(calibration.value, calibration.error);
     imu.ok = camera.SG_GetImuCalibration(imu.value, imu.error);
+    trigger.ok = camera.SG_GetCameraTriggerMode(trigger.value, trigger.error);
+    const bool triggerUnsupported = !trigger.ok &&
+        (trigger.error == "Trigger mode reading is supported on mono ISX031 cameras only" ||
+         trigger.error == "SIPL trigger mode reading is supported on mono ISX031 cameras only" ||
+         trigger.error == "Trigger mode reading requires a single sensor on the selected SIPL module");
     const bool erased = !imu.ok && imu.error == "IMU calibration is not programmed";
     const auto* info = device.ok ? &device.value : nullptr;
     const auto* calib = calibration.ok ? &calibration.value : nullptr;
-    const auto storage = StorageSource(info);
     std::cout << "sgMIX Camera Information\n" << std::string(70, '=') << '\n';
     PrintRuntime(info);
-    std::cout << '\n' << std::string(70, '=') << '\n' << storage
-              << " DATA - IN PROTOCOL ORDER\n" << std::string(70, '=') << '\n';
-    PrintCameraInfo(storage, info, image.ok ? &image.value : nullptr, !image.ok);
+    PrintField("Sensor Trigger Mode", trigger.ok ? SensorTriggerModeName(trigger.value)
+                                                : (triggerUnsupported ? "Not supported" : "Read failed"));
+    std::cout << '\n' << std::string(70, '=') << "\nCAMERA DATA - IN PROTOCOL ORDER\n"
+              << std::string(70, '=') << '\n';
+    PrintCameraInfo(kCameraData, info, image.ok ? &image.value : nullptr, !image.ok);
     if (!image.ok) {
         PrintField("Image Configuration", "Read failed");
         if (resolution.ok) {
@@ -605,13 +608,13 @@ bool GetAll(sgmix::CameraControl& camera) {
                        std::to_string(resolution.value.height) + " (separate resolution read)");
         }
     }
-    PrintLens(storage, info);
-    PrintRms(storage, calib);
-    PrintLeft(storage, calib);
-    PrintSerial(storage, serial.ok ? &serial.value : nullptr);
-    PrintRight(storage, calib);
-    PrintStereo(storage, calib);
-    PrintImuData(ImuSource(storage), imu.ok ? &imu.value : nullptr, erased);
+    PrintLens(kCameraData, info);
+    PrintRms(kCameraData, calib);
+    PrintLeft(kCameraData, calib);
+    PrintSerial(kCameraData, serial.ok ? &serial.value : nullptr);
+    PrintRight(kCameraData, calib);
+    PrintStereo(kCameraData, calib);
+    PrintImuData(kCameraData, imu.ok ? &imu.value : nullptr, erased);
     PrintCapabilities(info, calib);
     std::cout << "\n[Read Results]\n";
     PrintField("Device Information", device.ok ? "OK" : "FAILED");
@@ -620,9 +623,10 @@ bool GetAll(sgmix::CameraControl& camera) {
     PrintField("Image Configuration", image.ok ? "OK" : "FAILED");
     PrintField("Camera Calibration", calibration.ok ? "OK" : "FAILED");
     PrintField("IMU Calibration", imu.ok ? "OK" : (erased ? "NOT PROGRAMMED" : "FAILED"));
-    const unsigned passed = device.ok + serial.ok + resolution.ok + image.ok + calibration.ok + imu.ok;
+    PrintField("Sensor Trigger Mode", trigger.ok ? "OK" : (triggerUnsupported ? "NOT SUPPORTED" : "FAILED"));
+    const unsigned passed = device.ok + serial.ok + resolution.ok + image.ok + calibration.ok + imu.ok + trigger.ok;
     const unsigned empty = erased ? 1 : 0;
-    const unsigned failed = 6 - passed - empty;
+    const unsigned failed = 7 - passed - empty - triggerUnsupported;
     std::cout << '\n' << std::string(70, '=') << "\nRead completed: " << passed
               << " successful, " << empty << " not programmed, " << failed << " failed.\n";
     std::cout.flush();
@@ -632,6 +636,7 @@ bool GetAll(sgmix::CameraControl& camera) {
     if (!image.ok) PrintError("SG_GetImageInfo", image.error);
     if (!calibration.ok) PrintError("SG_GetCalibration", calibration.error);
     if (!imu.ok && !erased) PrintError("SG_GetImuCalibration", imu.error);
+    if (!trigger.ok && !triggerUnsupported) PrintError("SG_GetCameraTriggerMode", trigger.error);
     return failed == 0;
 }
 
@@ -659,7 +664,7 @@ int main(int argc, char* argv[]) {
     const std::string command = argv[commandIndex];
     const std::map<std::string, int> argumentCounts = {
         {"all", 0}, {"device-info", 0}, {"get-sn", 0}, {"get-resolution", 0},
-        {"get-image", 0}, {"get-calibration", 0}, {"get-imu", 0},
+        {"get-image", 0}, {"get-trigger-mode", 0}, {"get-calibration", 0}, {"get-imu", 0},
     };
     const auto arguments = argumentCounts.find(command);
     if (arguments == argumentCounts.end()) {
@@ -792,7 +797,7 @@ int main(int argc, char* argv[]) {
     }
     sgmix::CameraControl camera;
     std::string error;
-    const bool initialized = sipl ? camera.SG_Init(siplJson, siplConfig, error, siplMasks, cameraPort)
+    const bool initialized = sipl ? camera.SG_Init(sgmix::SiplCameraConfig{siplJson, siplConfig, siplMasks, cameraPort}, error)
                                   : camera.SG_Init(config, error);
     if (!initialized) {
         PrintError("SG_Init", error);
@@ -814,6 +819,8 @@ int main(int argc, char* argv[]) {
         success = GetResolution(camera);
     } else if (command == "get-image") {
         success = GetImageInfo(camera);
+    } else if (command == "get-trigger-mode") {
+        success = GetTriggerMode(camera);
     } else if (command == "get-calibration") {
         success = GetCalibration(camera);
     } else if (command == "get-imu") {

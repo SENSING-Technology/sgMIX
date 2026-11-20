@@ -24,7 +24,7 @@ static uint32_t number(const char* value) {
 
 static bool isIsx031Model(const std::string& model) {
     return model == "SG3S-ISX031C-GMSL2F-Hxxx" || model == "SG3S-ISX031C-GMSL2-Hxxx" ||
-           model == "SG3S11AFLK" || model == "SHF3L" || model == "SHF3H";
+           model == "SG3S11AFLK" || model == "SHF3L" || model == "M3A" || model == "SHF3H";
 }
 
 static uint32_t camNumber(const char* value) {
@@ -43,9 +43,9 @@ static void usage(const char* program) {
         << "Mode 1: Use Saved Configuration\n"
         << "  Use the camera model or SIPL settings saved by the configuration tool.\n\n"
         << "  V4L2:\n"
-        << "    " << program << " --v4l2 --video <video_device> <update_file>\n"
+        << "    " << program << " --v4l2 --video <video_device> [--full-rom] <update_file>\n"
         << "  SIPL:\n"
-        << "    " << program << " --sipl [--cam N] <update_file>\n\n"
+        << "    " << program << " --sipl [--cam N] [--full-rom] <update_file>\n\n"
         << "  Examples:\n"
         << "    " << program << " --v4l2 --video /dev/video7 firmware.bin\n"
         << "    " << program << " --sipl --cam 7 firmware.bin\n"
@@ -72,12 +72,13 @@ static void usage(const char* program) {
         << "  Examples:\n"
         << "    " << program << " --v4l2 --video /dev/video7 --get-version\n"
         << "    " << program << " --sipl --cam 7 --get-version\n\n"
-        << "  Supported: V4L2 ISX031 / S36 / GW5 / GW6; SIPL configured ISX031 / matched S36 stereo.\n\n"
+        << "  Supported: V4L2 ISX031 / S36 / GW5 / GW6; SIPL ISX031 / GW5 / matched S36 or SDT2BCO1 stereo.\n\n"
         << "Options\n"
         << "  --video PATH                V4L2 video device, e.g. /dev/video7\n"
         << "  --model MODEL               Override the saved V4L2 camera model\n"
         << "  --bus N                     Override the V4L2 I2C bus\n"
         << "  --cam N                     Select a SIPL Driver CAM (zero-based decimal)\n"
+        << "  --full-rom                  Full ROM update for GW6 cameras on V4L2 or supported SIPL configurations\n"
         << "  --json PATH                 SIPL camera JSON file\n"
         << "  --config NAME               Platform configuration name in the JSON file\n"
         << "  --mask \"MASK ...\"           Quoted masks in driver transport order\n"
@@ -98,7 +99,7 @@ static void usage(const char* program) {
         << "  --sipl [--cam N] --restore-right-address: address repair only, without firmware input.\n"
         << "  Address-only repair bypasses old right-eye version preflight; release/reinitialize afterward.\n"
         << "  SIPL firmware updates require a matched driver route.\n"
-        << "  SIPL GW6 also requires a verified mono route and 7-bit alias 0x6D.\n"
+        << "  SIPL GW6 updates require a matching stereo driver configuration and a local .rom.\n"
         << "  Update files may use local paths or SDK-supported encoded download addresses.\n";
 }
 
@@ -124,18 +125,26 @@ int main(int argc, char** argv) {
         const bool sipl = siplMode;
         sgmix::CameraConfig config;
         std::string json, name, path, error;
+        bool fullRom = false;
         std::vector<uint32_t> masks;
         try {
-            path = argv[argc - 1];
-            if (path.empty() || (path.rfind("--", 0) == 0 && path != "--get-version" && path != "--restore-right-address"))
-                throw std::invalid_argument("Put an update file or --get-version last");
             std::set<std::string> seen;
-            for (int i = 2; i < argc - 1; ++i) {
-                std::string key = argv[i];
+            for (int i = 2; i < argc; ++i) {
+                const std::string key = argv[i];
+                if (key.rfind("--", 0) != 0 || key == "--get-version" || key == "--restore-right-address") {
+                    if (key.empty() || i != argc - 1)
+                        throw std::invalid_argument("Put the update file or operation flag last");
+                    path = key;
+                    break;
+                }
                 if (seen.count(key))
                     throw std::invalid_argument("Repeated option: " + key);
                 seen.insert(key);
-                if (i + 1 >= argc - 1 || std::string(argv[i + 1]).empty() ||
+                if (key == "--full-rom") {
+                    fullRom = true;
+                    continue;
+                }
+                if (i + 1 >= argc || std::string(argv[i + 1]).empty() ||
                     std::string(argv[i + 1]).rfind("--", 0) == 0)
                     throw std::invalid_argument("Missing value for " + key);
                 const char* value = argv[++i];
@@ -159,6 +168,10 @@ int main(int argc, char** argv) {
                 }
                 else throw std::invalid_argument("Unknown option for this mode: " + key);
             }
+            if (path.empty())
+                throw std::invalid_argument("Specify an update file or --get-version");
+            if (fullRom && path.rfind("--", 0) == 0)
+                throw std::invalid_argument("--full-rom requires a firmware file");
             if (!sipl && path=="--restore-right-address")
                 throw std::invalid_argument("--restore-right-address requires --sipl");
             if (!sipl && config.videoDevice.rfind("/dev/", 0) != 0)
@@ -170,11 +183,10 @@ int main(int argc, char** argv) {
             usage(argv[0]);
             return 2;
         }
-        if (path.empty()) throw std::invalid_argument("Update file must not be empty");
         bool powerCycleRequired = isIsx031Model(config.model) || config.model == "S36";
         {
             sgmix::CameraControl camera;
-            const bool initialized = sipl ? camera.SG_Init(json, name, error, masks, cameraPort)
+            const bool initialized = sipl ? camera.SG_Init(sgmix::SiplCameraConfig{json, name, masks, cameraPort}, error)
                                           : camera.SG_Init(config, error);
             if (!initialized) throw std::runtime_error("SG_Init: " + error);
             // An application sharing a SIPL session must stop every camera before OTA.
@@ -195,19 +207,17 @@ int main(int argc, char** argv) {
                 std::cout << "Firmware version (running): " << version << '\n';
                 return 0;
             }
-            // ISX031 and matched S36 report running firmware versions before update.
-            if (sipl && versionRead) powerCycleRequired = true;
-            if ((sipl && !versionRead) || (!sipl && config.model.empty())) {
+            if (sipl || config.model.empty()) {
                 sgmix::DeviceInfo info;
                 std::string infoError;
                 const bool infoRead = camera.SG_GetDeviceInfo(info, infoError);
                 // The SDK fills the bound model before optional storage reads.
                 // Metadata failure must not become a new V4L2 OTA prerequisite.
                 powerCycleRequired = powerCycleRequired || isIsx031Model(info.model) || info.model == "S36";
-                if (sipl && !infoRead)
+                if (sipl && !versionRead && !infoRead)
                     throw std::runtime_error("Cannot verify SIPL update target: " + versionError +
                                              "; SG_GetDeviceInfo: " + infoError);
-                if (sipl && isIsx031Model(info.model))
+                if (sipl && !versionRead && isIsx031Model(info.model))
                     throw std::runtime_error("SG_GetFirmwareVersion before update: " + versionError);
             }
             std::cout << "[OTA] Start " << (sipl ? "SIPL" : "V4L2")
@@ -216,7 +226,7 @@ int main(int argc, char** argv) {
                 std::cout << "Version before update (running): " << version << '\n';
             else
                 std::cerr << "Version before update unavailable: " << versionError << '\n';
-            if (!camera.SG_PerformOTAUpdate(path, error))
+            if (!camera.SG_PerformOTAUpdate(path, error, fullRom))
                 throw std::runtime_error("SG_PerformOTAUpdate: " + error);
             // Release the session before using hardware that the update may have reset.
         }

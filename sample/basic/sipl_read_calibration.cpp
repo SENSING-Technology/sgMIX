@@ -26,7 +26,9 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("PORT is out of range");
         // Empty JSON path, config name and masks load the saved SIPL settings.
         // port selects a zero-based Driver CAM connector, not a module channel index.
-        check(camera.SG_Init("", "", error, {}, static_cast<std::uint32_t>(port)));
+        sgmix::SiplCameraConfig device;
+        device.cameraPort = static_cast<std::uint32_t>(port);
+        check(camera.SG_Init(device, error));
         // Receives stored calibration; this API reads existing data rather than calibrating a camera.
         sgmix::CameraCalibration calibration;
         // Read and CRC-validate calibration through the initialized SIPL session.

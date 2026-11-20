@@ -30,8 +30,10 @@ int main(int argc, char** argv) {
         };
         // Both objects bind the same zero-based Driver CAM connector. Empty JSON/config
         // and masks load the saved SIPL settings; channels are selected separately below.
-        check(left.SG_Init("", "", error, {}, static_cast<std::uint32_t>(port)));
-        check(right.SG_Init("", "", error, {}, static_cast<std::uint32_t>(port)));
+        sgmix::SiplCameraConfig device;
+        device.cameraPort = static_cast<std::uint32_t>(port);
+        check(left.SG_Init(device, error));
+        check(right.SG_Init(device, error));
         sgmix::CaptureConfig leftConfig, rightConfig;
         // Select module-local sensors in Query order; confirm physical left/right mapping
         // in the driver configuration. These selectors do not synchronize exposure.

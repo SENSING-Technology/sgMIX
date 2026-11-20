@@ -1,0 +1,47 @@
+{
+  // S56C 双目模组：2x VB1940，RAW10，走 ISP0 硬件 ISP
+  "name": "s56c",
+  "description": "S56C 双目模组（2x VB1940，RAW10，走 ISP0 硬件 ISP）",
+
+  // 输出路径：isp = RAW 模组走 ISP0 硬件 ISP → NV12 → VIC → BGR
+  "output": "isp",
+
+  // 采集后端：
+  //   auto = 运行时自动探测（推荐）。检测 /usr/lib/nvsipl_drv/libnvuddf_s56c_*.so
+  //          （SIPL 驱动包）→ 走 SIPL；否则检测 /dev/videoN（GMSL2x8 驱动包）→
+  //          RAW/ISP 模组走 argus（nvargus-daemon + nvarguscamerasrc）。
+  //   sipl = 强制 SIPL 用户态（需 SIPL 驱动包已 install.sh）
+  //   argus = 强制 nvarguscamerasrc（需 GMSL2x8 驱动包 + nvargus-daemon，见 readme）
+  "backend": "auto",
+
+  // 平台查询 json（相对 SDK 根目录）与其中 SensorSystemConfig 的名称
+  "sipl_json": "sipl/s56c.json",
+  "sipl_config": "S56C_2CH",
+
+  // 传感器原生采集分辨率与帧率
+  "capture_width": 2560,
+  "capture_height": 1984,
+  "fps": 30,
+
+  // 期望的标定模型类型（仅提示性校验）：fisheye / pinhole
+  "calib_type": "fisheye",
+
+  // pipeline0/1 与标定文件左/右目的对应关系（由模组内部 GMSL 接线决定）：
+  // true  = pipeline0 是物理右目，路由时需交换（s56c 2026-09-20 极线实测）
+  // false = pipeline0 是物理左目，无需交换（如 s36）
+  "swap_lr": true,
+
+  // GMSL 端口名 → link 掩码 [Transport0(AB), Transport1(CD)]
+  // cam0=[0x0000,0x0001] cam1=[0x0000,0x0002] cam2=[0x0000,0x0100] cam3=[0x0000,0x0200]
+  // cam4=[0x0001,0x0000] cam5=[0x0002,0x0000] cam6=[0x0100,0x0000] cam7=[0x0200,0x0000]
+  "ports": {
+    "cam0": ["0x0000", "0x0001"],
+    "cam1": ["0x0000", "0x0002"],
+    "cam2": ["0x0000", "0x0100"],
+    "cam3": ["0x0000", "0x0200"],
+    "cam4": ["0x0001", "0x0000"],
+    "cam5": ["0x0002", "0x0000"],
+    "cam6": ["0x0100", "0x0000"],
+    "cam7": ["0x0200", "0x0000"]
+  }
+}
