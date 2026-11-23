@@ -261,11 +261,22 @@ sudo apt-get install -y cmake build-essential pkg-config \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     cuda-toolkit tensorrt
 
+# Required for the Argus route (running s56c/s56 on the GMSL2x8
+# package): nvidia-l4t-gstreamer. NEVER install it without a version
+# (apt would pull the newest release and upgrade the kernel from
+# 39.2.0 to 39.2.1, breaking the sgcam_gmsl2.ko symbol CRCs; see FAQ
+# Q10). You must pin the version matching the 39.2.0 kernel and hold
+# it afterwards (setup_env.sh does this automatically; copy these
+# commands verbatim when installing manually):
+sudo apt-get install -y nvidia-l4t-gstreamer=39.2.0-20260601141651
+sudo apt-mark hold nvidia-l4t-gstreamer
+
 # Verify (all should output normally):
 cmake --version | head -1
 /usr/local/cuda/bin/nvcc --version | tail -1          # CUDA 13.2
 ls /usr/lib/aarch64-linux-gnu/libnvinfer.so.10        # TensorRT 10.x runtime
 apt-cache policy libopencv-dev | grep Candidate       # should be 4.8.0 (NVIDIA repo)
+dpkg-query -W -f='${Version}' nvidia-l4t-gstreamer    # should be 39.2.0-20260601141651
 ls /usr/src/jetson_sipl_api                           # SIPL dev headers (provided by the
                 # "SIPL" component of the JetPack BSP/SDK Manager; the SENSING
                 # camera driver does not install it. If missing, get the matching
@@ -702,10 +713,15 @@ A10: Kernel and camera driver .ko version mismatch (symbol CRC
      mismatch). Run journalctl -k | grep sgcam and you will see many:
        sgcam_gmsl2: Unknown symbol tegracam_xxx (err -22)
        sgcam_gmsl2: disagrees about version of symbol ...
-     Cause: sudo apt-get install nvidia-l4t-gstreamer was executed (or
-     any package that upgrades nvidia-l4t-kernel), moving the kernel
-     from 39.2.0 to 39.2.1, while the GMSL2x8 custom .ko modules were
-     built against 39.2.0; the symbol CRCs no longer match.
+     Cause: sudo apt-get install nvidia-l4t-gstreamer was executed
+     without a version pin (or any package that upgrades
+     nvidia-l4t-kernel), moving the kernel from 39.2.0 to 39.2.1, while
+     the GMSL2x8 custom .ko modules were built against 39.2.0; the
+     symbol CRCs no longer match. Note: the package itself is required
+     for the Argus route (s56c/s56) - it is not forbidden, it must
+     simply be pinned to the 39.2.0-matching 39.2.0-20260601141651 and
+     held (setup_env.sh already installs it pinned; see Section 11,
+     item 10).
      Fix: rerun the vendor install.sh to restore the matching kernel,
      then reboot:
        cd <GMSL2x8 driver package directory> && sudo ./install.sh && sudo reboot
@@ -776,18 +792,23 @@ A11: Two points:
 9) The S36 can only connect to CAM0/CAM2/CAM4/CAM6; the S36 sipl_config
    must match the module firmware resolution, otherwise the frame rate
    is 0 after streaming starts.
-10) In a GMSL2x8 custom driver environment, NEVER sudo apt-get install
-    nvidia-l4t-gstreamer (or any package whose dependency chain moves
-    nvidia-l4t-kernel from 39.2.0 to 39.2.1); the kernel symbol CRC
-    change will make sgcam-gmsl2.ko fail to load ("Invalid
-    parameters"/Unknown symbol; see FAQ Q10). Even if install.sh
-    afterwards restores /dev/video*, deeper residue may remain: all
-    cameras report "Failed to create device link (0x180)" and capture
-    no frames; only reflashing to L4T R39.2 fixes it (see FAQ Q10
-    addendum). The official way to bring up RAW cameras is libargus
-    (argus_camera, from nvidia-l4t-jetson-multimedia-api), which does
-    not depend on GStreamer plugins and does not trigger kernel
-    upgrades.
+10) In a GMSL2x8 custom driver environment (the Argus route for
+    s56c/s56 requires nvidia-l4t-gstreamer), nvidia-l4t-gstreamer is
+    allowed ONLY at 39.2.0-20260601141651. NEVER run sudo apt-get
+    install nvidia-l4t-gstreamer without a version pin (or any package
+    whose dependency chain moves nvidia-l4t-kernel from 39.2.0 to
+    39.2.1); the kernel symbol CRC change will make sgcam-gmsl2.ko fail
+    to load ("Invalid parameters"/Unknown symbol; see FAQ Q10). The
+    correct procedure (already built into setup_env.sh):
+      sudo apt-get install -y nvidia-l4t-gstreamer=39.2.0-20260601141651
+      sudo apt-mark hold nvidia-l4t-gstreamer
+    Even if install.sh afterwards restores /dev/video*, deeper residue
+    may remain: all cameras report "Failed to create device link
+    (0x180)" and capture no frames; only reflashing to L4T R39.2 fixes
+    it (see FAQ Q10 addendum). The official way to bring up RAW cameras
+    is libargus (argus_camera, from nvidia-l4t-jetson-multimedia-api),
+    which does not depend on GStreamer plugins and does not trigger
+    kernel upgrades.
 11) When verifying SIPL <-> GMSL2x8 framework switching on the same
     machine: the GMSL2x8 package's install.sh overwrites /boot/Image
     with the custom kernel and replaces dtbo/custom .ko/nito and other

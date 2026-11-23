@@ -344,11 +344,20 @@ sudo apt-get install -y cmake build-essential pkg-config \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     cuda-toolkit tensorrt
 
+# Argus 路线（GMSL2x8 包跑 s56c/s56）必需：nvidia-l4t-gstreamer。
+# 严禁直接 apt install nvidia-l4t-gstreamer（会拉最新版并把内核从
+# 39.2.0 升到 39.2.1，导致 sgcam_gmsl2.ko 符号 CRC 不匹配，见 FAQ Q10），
+# 必须显式指定与 39.2.0 内核配套的版本，装完 hold 防后续被升级
+# （setup_env.sh 已内置以下命令，手动安装时照抄即可）：
+sudo apt-get install -y nvidia-l4t-gstreamer=39.2.0-20260601141651
+sudo apt-mark hold nvidia-l4t-gstreamer
+
 # 验证（都应正常输出）：
 cmake --version | head -1
 /usr/local/cuda/bin/nvcc --version | tail -1          # CUDA 13.2
 ls /usr/lib/aarch64-linux-gnu/libnvinfer.so.10        # TensorRT 10.x 运行库
 apt-cache policy libopencv-dev | grep Candidate       # 应为 4.8.0（NVIDIA 源）
+dpkg-query -W -f='${Version}' nvidia-l4t-gstreamer    # 应为 39.2.0-20260601141651
 ls /usr/src/jetson_sipl_api                           # SIPL 开发头文件（仅自编译需要；只跑
                 # 预编译程序则完全不需要）。CMake 优先用 SDK 内置 third_party/jetson_sipl/，
                 # 该目录缺失或损坏时可从 NVIDIA 官网下载 SIPL API 包补入
@@ -717,9 +726,12 @@ A10: 内核与相机驱动 .ko 版本不匹配（符号 CRC 不一致）。执�
      journalctl -k | grep sgcam 会看到大量：
        sgcam_gmsl2: Unknown symbol tegracam_xxx (err -22)
        sgcam_gmsl2: disagrees about version of symbol ...
-     原因：执行过 sudo apt-get install nvidia-l4t-gstreamer（或任何会
-     升级 nvidia-l4t-kernel 的包），内核从 39.2.0 被升到 39.2.1，而
-     GMSL2x8 定制 .ko 是按 39.2.0 编译的，符号 CRC 对不上。
+     原因：不带版本号执行过 sudo apt-get install nvidia-l4t-gstreamer
+     （或任何会升级 nvidia-l4t-kernel 的包），内核从 39.2.0 被升到 39.2.1，
+     而 GMSL2x8 定制 .ko 是按 39.2.0 编译的，符号 CRC 对不上。注意：该包
+     本身是 argus 跑 s56c/s56 的必需依赖，不是不能装，而是只能装与
+     39.2.0 内核配套的 39.2.0-20260601141651 并 hold（setup_env.sh
+     已内置锁版本安装，见第 11 节第 10 条）。
      处理：重新跑厂商 install.sh 装回配套内核后重启：
        cd <GMSL2x8 驱动包目录> && sudo ./install.sh && sudo reboot
      重启后再 sudo ./load_modules.sh 即可恢复 /dev/video*。
@@ -788,11 +800,15 @@ A12: 编译时 SIPL 头文件缺失，二进制被静默降级为无 SIPL 版本
    修改（损坏后将无法推理且无法本地重建）。
 9) S36 只能接 CAM0/CAM2/CAM4/CAM6；S36 的 sipl_config 必须与模组
    固件分辨率一致，否则起流后帧率为 0。
-10) GMSL2x8 定制驱动包环境下，严禁 sudo apt-get install
-    nvidia-l4t-gstreamer（或依赖链里任何会把 nvidia-l4t-kernel 从
-    39.2.0 升到 39.2.1 的包），否则内核符号 CRC 变化会导致
-    sgcam-gmsl2.ko 加载失败（"Invalid parameters"/Unknown symbol，
-    详见 FAQ Q10）。即使之后跑 install.sh 恢复了 /dev/video*，也仍可能
+10) GMSL2x8 定制驱动包环境下（argus 跑 s56c/s56 需要 nvidia-l4t-gstreamer），
+    nvidia-l4t-gstreamer 只允许 39.2.0-20260601141651，严禁不带版本号执行
+    sudo apt-get install nvidia-l4t-gstreamer（或装依赖链里任何会把
+    nvidia-l4t-kernel 从 39.2.0 升到 39.2.1 的包），否则内核符号 CRC 变化
+    会导致 sgcam-gmsl2.ko 加载失败（"Invalid parameters"/Unknown symbol，
+    详见 FAQ Q10）。正确姿势（setup_env.sh 已内置）：
+      sudo apt-get install -y nvidia-l4t-gstreamer=39.2.0-20260601141651
+      sudo apt-mark hold nvidia-l4t-gstreamer
+    即使之后跑 install.sh 恢复了 /dev/video*，也仍可能
     残留更深的污染：全部相机报 "Failed to create device link (0x180)"
     且采不到帧，此时只能重新刷机回 L4T R39.2（见 FAQ Q10 补充）。
     RAW 相机点亮的官方途径是 libargus（argus_camera，
